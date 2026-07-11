@@ -1,0 +1,5 @@
+# 盯盘/monitor 命令专用最小依赖（monitor/position/log/info 等命令只需要这些）。
+# predict/scan/backtest/kline 等选股功能需要 sklearn/matplotlib，见 requirements.txt。
+pandas>=1.5.0
+numpy>=1.23.0
+requests>=2.28.0

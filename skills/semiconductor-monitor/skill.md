@@ -21,6 +21,11 @@ description: "半导体板块盯盘及588170科创板ETF实时操盘方案指导
 [60日最高] = 从 qstock 历史K线计算的60日最高价
 [60日最低] = 从 qstock 历史K线计算的60日最低价
 [20日均量] = 从 qstock 历史K线计算的20日平均成交量
+[竞价价]   = 9:15-9:25集合竞价阶段从 qstock 获取的实时竞价成交价
+             （竞价阶段结束后即为开盘价）
+[开盘价]   = 9:30开盘后从 qstock 获取的当日第一笔成交价（即K线的"今开"）；
+             集合竞价结束时的[竞价价]就是[开盘价]，两者是同一个值在不同
+             时间点的称呼，不需要重复获取
 ```
 
 ### 动态计算公式（禁止替换为固定值）
@@ -31,6 +36,8 @@ description: "半导体板块盯盘及588170科创板ETF实时操盘方案指导
 [做T买入位]  = [当前价] × 0.98（实时计算）
 [做T卖出位]  = [当前价] × 1.02（实时计算）
 [昨收+2%]   = [昨收价] × 1.02
+[昨收+3%]   = [昨收价] × 1.03（比[昨收+2%]更强的确认阈值，用于10:00方向
+             确认时判断涨势是否延续，见"情景B/C"）
 [昨收-2%]   = [昨收价] × 0.98
 [昨收-4%]   = [昨收价] × 0.96
 [成本+2%]   = [加权成本] × 1.02
@@ -41,6 +48,14 @@ description: "半导体板块盯盘及588170科创板ETF实时操盘方案指导
 [盈亏比例]   = ([当前价] / [加权成本] - 1) × 100%
 [距回本]     = ([加权成本] / [当前价] - 1) × 100%
 [止损亏损]   = ([加权成本] - [止损位]) × [持仓数量]
+[资金上限比例] = 80%（默认值，做T单次最多使用的可用资金比例，见"做T操作
+             方案"，对应 `monitor` 命令内部的 t_cash_cap_pct 参数）
+[做T可用资金上限] = [可用资金] × [资金上限比例]
+[做T可买份数] = [做T可用资金上限] ÷ [做T买入位]（向下取整，标准做T场景，
+             见"做T操作方案"）
+[挂单可买份数] = [做T可用资金上限] ÷ 实际挂单价（向下取整，用于非标准做T
+             买入位的挂单场景，如按[昨收-2%]等价位挂单买入时，见"第四步
+             情景D/E/F"）
 ```
 
 ### 执行规则
@@ -48,8 +63,8 @@ description: "半导体板块盯盘及588170科创板ETF实时操盘方案指导
 1. **每次使用技能必须先获取变量值**，不能跳过
 2. **所有价格判断必须用变量**，不能写"1.31"、"1.27"等固定数
 3. **输出给用户时显示变量的实际值**，如"当前价1.292，做T买入位1.266"
-4. **做T份额根据可用资金计算**：买入份额 = [可用资金×资金上限比例] ÷ [做T买入位]
-   （默认资金上限比例80%，不满仓做T，见"做T操作方案"）
+4. **做T份额根据可用资金计算**：[做T可买份数] = [做T可用资金上限] ÷ [做T买入位]
+   （[做T可用资金上限] = [可用资金] × 80%，不满仓做T，见"做T操作方案"）
 5. **每次输出结论都必须附带风险提示**："以上仅供参考，不构成投资建议，市场
    有风险，操作需自行判断"（`monitor` 命令已自动输出此提示）
 6. **不构成投资建议**：本技能所有输出均基于历史数据和技术指标的规则计算，
@@ -72,15 +87,16 @@ description: "半导体板块盯盘及588170科创板ETF实时操盘方案指导
 
 **本地持久化（D11）：** `monitor` 命令默认会把本次输入的持仓信息保存到
 `~/.cc-switch/skills/semiconductor-monitor/positions.json`（纯本地文件，
-不联网）。下次会话可先用以下命令查看是否已有保存值，若用户确认沿用则无需
-再次询问，若用户说"仓位变了"则重新询问并保存：
+不联网，该存储路径由代码固定写死，与技能本身安装在何处无关）。下次会话
+可先用以下命令查看是否已有保存值，若用户确认沿用则无需再次询问，若用户说
+"仓位变了"则重新询问并保存：
 
 ```bash
-python3 ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py position show 588170
+python3 qstock/main.py position show 588170
 ```
 
 若本次不希望保存（如仅测算/试算场景），在 `monitor` 命令后加 `--no-save`。
-清除已保存信息：`python3 main.py position clear 588170`。
+清除已保存信息：`python3 qstock/main.py position clear 588170`。
 
 **止损位计算示例：**
 - 用户说"最多亏3000元" → [止损位] = [加权成本] - 3000 ÷ [持仓数量]
@@ -91,6 +107,14 @@ python3 ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py position show 5
 
 当用户说"帮我盯盘"/"半导体怎么看"/"588170怎么操作"/"周一开盘怎么操作"等，按以下流程全自动执行。
 
+> **路径约定：** 本文档下方所有命令中的 `qstock/main.py` 均为**相对于本
+> 技能根目录（即本 skill.md 所在目录）的相对路径**。执行前请先将工作目录
+> 切换到本技能根目录（`cd` 到 skill.md 所在文件夹），再执行下述命令；若
+> 已知本技能在磁盘上的绝对路径，也可以直接把 `qstock/main.py` 替换为
+> `<技能绝对路径>/qstock/main.py`。**不要使用旧版文档中的
+> `~/.cc-switch/skills/semiconductor-monitor/...` 路径，该路径不是本技能
+> 的实际安装约定。**
+
 ### 第零步：环境检查（每次必做）
 
 **在执行任何 qstock 操作之前，先检测 Python 命令并确保依赖已安装：**
@@ -99,16 +123,21 @@ python3 ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py position show 5
 # 跨平台检测 Python 命令：Windows 用 python，macOS/Linux 用 python3
 PY=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
 PIP=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null || echo pip3)
-$PIP install -r ~/.cc-switch/skills/semiconductor-monitor/qstock/requirements.txt -q 2>&1 || true
+# 盯盘流程（info/monitor/position/log）只依赖 pandas/numpy/requests，
+# 用 requirements-monitor.txt 这个精简依赖清单即可，不需要 sklearn/matplotlib
+$PIP install -r qstock/requirements-monitor.txt -q 2>&1 || true
 ```
 
 后续所有 qstock 命令统一使用 `$PY` 变量（Bash 中已通过上述检测设置），或直接用 `python3`/`python` 二者皆可的回退写法：
 
 ```bash
-python3 ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py info 588170 2>/dev/null || python ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py info 588170
+python3 qstock/main.py info 588170 2>/dev/null || python qstock/main.py info 588170
 ```
 
-如果安装失败，则后续技术指标计算改用纯 Python 手动计算（不依赖 sklearn/matplotlib），从 `data.fetcher` 直接导入 `get_kline` 获取K线数据后，手动计算 RSI/MACD/KDJ/布林带/MA 等指标。
+如果安装失败（网络原因等），可先检查 `pandas`/`numpy`/`requests` 是否已经
+存在（很多环境自带），三者齐备即可正常运行 `monitor`/`info`/`position`/
+`log` 命令（技术指标计算已在 `strategy/monitor.py` 和 `model/technical.py`
+中用纯 pandas/numpy 实现，不依赖 sklearn/matplotlib，无需再手写指标代码）。
 
 ### 第一步：获取变量值（每次必做）
 
@@ -118,7 +147,7 @@ python3 ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py info 588170 2>/
 
 **2. 获取实时数据**
 ```bash
-python3 ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py info 588170 2>/dev/null || python ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py info 588170
+python3 qstock/main.py info 588170 2>/dev/null || python qstock/main.py info 588170
 ```
 
 > **A1：588170是ETF，不是个股，没有PE/PB/ROE等财务指标。** `info` 命令会
@@ -135,10 +164,11 @@ python3 ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py info 588170 2>/
 `main.py` 的 `monitor` 子命令统一调用，不再在本文档中内嵌 Python 代码：
 
 ```bash
-python3 ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py monitor 588170 \
+python3 qstock/main.py monitor 588170 \
   --position [持仓数量] --cost [加权成本] --cash [可用资金] \
   --max-loss-pct [最大亏损比例]
-# 或用 --max-loss-amount [最大亏损金额] / --stop-loss-price [止损价] 指定止损方式
+# 或用 --max-loss-amount [最大亏损金额] / --stop-loss-price [止损位] 指定止损方式
+# （--stop-loss-price 用于用户直接指定止损位数值的场景，等价于[止损位]）
 # 首次询问后默认自动保存到本地，若不想保存加 --no-save
 ```
 
@@ -151,8 +181,15 @@ RSI/MACD/KDJ/布林带等技术指标。
 
 > **以下健壮性已在代码层自动处理，无需在对话中手动判断：**
 > - **实时价格兜底（A3）**：`当前价` 优先取实时接口，失败时自动回退到最新
->   K线收盘价，`[价格来源]` 字段会标明是 `realtime` 还是 `kline_fallback`，
->   输出给用户时应带上该字段，让用户知道价格是否为实时数据。
+>   K线收盘价。`[价格来源]` 字段有以下三种取值，输出给用户时应带上该字段，
+>   让用户知道价格是否为实时数据：
+>   - `realtime`：实时行情接口成功返回，当前价可信度最高
+>   - `kline_fallback`：实时接口失败，已回退到最近一个交易日的K线收盘价
+>     （`get_current_quote` 内部兜底），当前价可能非盘中最新价
+>   - `kline_only`：实时接口和上面的K线兜底均失败，只能用最初获取历史K线
+>     时的最新收盘价（`compute_monitor_variables` 的最后一层兜底）。出现
+>     该值说明数据链路可能存在问题，执行时应更明确提醒用户"当前价可能非
+>     最新，请自行核实实时行情"
 > - **拆分跳空自动检测（A2）**：若历史K线中检测到相邻交易日收盘价变动超过
 >   30%（疑似份额拆分/合并且未复权，如588170历史上出现过的整数倍跳空），
 >   会自动截断到跳空之后的干净数据窗口重新计算，并在输出中附带
@@ -303,7 +340,7 @@ RSI/MACD/KDJ/布林带等技术指标。
       ├─ 横盘震荡 → 继续等
       └─ 回落到[昨收价]附近 → 等企稳
 10:00 方向确认
-      ├─ 站稳[昨收+2%+1%]以上 → 持有，等回本
+      ├─ 站稳[昨收+3%]以上 → 持有，等回本
       ├─ 在[昨收价]~[昨收+2%]震荡 → 不动
       └─ 跌破[昨收价] → 观望，不急于割肉
 ```
@@ -320,8 +357,8 @@ RSI/MACD/KDJ/布林带等技术指标。
       ├─ 跌到[昨收-2%] → 准备买入
       └─ 横盘不动 → 继续等
 10:00 方向确认
-      ├─ 涨到[昨收+2%+1%]以上 → 挂[昨收+2%+1%]卖出[持仓数量×20%]份
-      ├─ 跌到[当前价×0.98]附近 → 挂[当前价×0.98]买入[做T可用资金上限÷做T买入位]份
+      ├─ 涨到[昨收+3%]以上 → 挂[昨收+3%]卖出[持仓数量×20%]份
+      ├─ 跌到[做T买入位]附近 → 挂[做T买入位]买入[做T可买份数]份
       └─ 在[昨收-2%]~[昨收+2%]震荡 → 不动，等明天
 ```
 
@@ -336,7 +373,7 @@ RSI/MACD/KDJ/布林带等技术指标。
       ├─ 在[昨收-2%]~[昨收-2.5%]企稳 → 可考虑买入
       └─ 跌破[昨收-2.5%] → 不买，等更低位置
 9:45  如果企稳在[昨收-2%]附近
-      └─ 挂单：[昨收-2%]买入[做T可用资金上限÷昨收-2%]份
+      └─ 挂单：[昨收-2%]买入[挂单可买份数]份（挂单价为[昨收-2%]）
 10:00 确认
       ├─ 买入成功且反弹到[昨收价]以上 → 等[昨收+2%]卖出
       ├─ 买入成功但继续下跌 → 观察，设[止损位]止损
@@ -546,11 +583,11 @@ RSI/MACD/KDJ/布林带等技术指标。
 复盘技能给出的建议历史表现（纯本地文件，不联网）：
 
 ```bash
-python3 ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py log add 588170 \
+python3 qstock/main.py log add 588170 \
   --decision-action "止损清仓" --price 1.21 --shares 16000 --note "跌破止损位分批止损第一次"
 
 # 查看历史记录
-python3 ~/.cc-switch/skills/semiconductor-monitor/qstock/main.py log show 588170
+python3 qstock/main.py log show 588170
 ```
 
 ## ⚠️ 免责声明
