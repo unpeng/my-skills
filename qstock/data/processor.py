@@ -37,6 +37,46 @@ def clean_kline(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def detect_and_truncate_split(df: pd.DataFrame,
+                              gap_threshold: float = 0.30) -> tuple:
+    """
+    检测历史K线中是否存在疑似份额拆分/合并导致的未复权跳空，
+    若存在则截断到最近一次异常跳空之后的数据窗口。
+
+    判断依据：相邻两个交易日收盘价变动幅度超过 gap_threshold（默认30%），
+    且不是涨跌停（A股/ETF正常涨跌停一般不超过±20%，散户很难单日
+    ±30%以上还是正常涨跌），大概率是拆分/合并/错误数据导致的价格跳空，
+    而非真实交易波动。
+
+    Args:
+        df: K线 DataFrame，需按日期升序排列，含 'close' 列
+        gap_threshold: 判定为异常跳空的收盘价变动幅度阈值（如0.30表示30%）
+
+    Returns:
+        (truncated_df, split_detected, split_date) 三元组：
+        - truncated_df: 截断后的DataFrame（若未检测到跳空则原样返回）
+        - split_detected: 是否检测到疑似拆分
+        - split_date: 检测到的最近一次跳空日期（字符串），未检测到则为 None
+    """
+    if df.empty or len(df) < 2:
+        return df, False, None
+
+    df = df.copy()
+    pct_change = df["close"].pct_change().abs()
+    gap_mask = pct_change > gap_threshold
+
+    if not gap_mask.any():
+        return df, False, None
+
+    # 取最近一次异常跳空的位置，截断到跳空之后（含跳空当日）
+    last_gap_idx = gap_mask[gap_mask].index[-1]
+    gap_pos = df.index.get_loc(last_gap_idx)
+    split_date = str(df.iloc[gap_pos].get("date", last_gap_idx))
+
+    truncated = df.iloc[gap_pos:].copy()
+    return truncated, True, split_date
+
+
 def compute_returns(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
     """
     Compute forward and backward returns for various periods.

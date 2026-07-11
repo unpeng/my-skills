@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+# 本地持仓/决策记录数据，含用户真实持仓成本、资金等敏感信息，不应提交
+positions.json
+decision_log.jsonl

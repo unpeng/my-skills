@@ -215,15 +215,42 @@ def cmd_kline(args):
 
 
 def cmd_info(args):
-    """Display stock basic information and financial metrics."""
-    from data.fetcher import get_financial, get_kline
+    """Display stock/ETF basic information.
+
+    A1: ETF 没有 PE/PB/ROE 等财务指标，改用 ETF 专属信息（价格、流动性等），
+    不再套用个股基本面评分体系。
+    """
+    from data.fetcher import is_etf_code, get_etf_info
     from model.fundamental import score_stock
 
     code = args.code
 
     print(f"正在获取 {code} 的基本信息...")
 
-    # Financial info
+    if is_etf_code(code):
+        try:
+            result = get_etf_info(code)
+        except Exception as e:
+            print(f"错误: 获取ETF信息失败: {e}")
+            return
+        if "error" in result:
+            print(f"错误: {result['error']}")
+            return
+
+        print(f"\n{'='*40}")
+        print(f"ETF: {code}（基金类标的，不适用个股基本面评分）")
+        print(f"{'='*40}")
+        print(f"  当前价:       {result.get('price', 'N/A')}")
+        print(f"  涨跌幅:       {result.get('change_pct', 'N/A')}%")
+        print(f"  换手率:       {result.get('turnover_rate', 'N/A')}%")
+        print(f"  20日均成交额: {result.get('avg_turnover_20d', 'N/A')}")
+        print(f"  20日均成交量: {result.get('avg_volume_20d', 'N/A')}")
+        print(f"  数据来源:     {result.get('source', 'N/A')}")
+        if result.get("premium_pct") is None:
+            print(f"  溢价率:       暂无数据源，请勿凭空估算")
+        return
+
+    # Financial info (个股才适用 PE/PB/ROE 评分)
     result = score_stock(code)
     if "error" in result:
         print(f"错误: {result['error']}")
@@ -249,18 +276,33 @@ def cmd_info(args):
 
 def cmd_monitor(args):
     """计算588170盯盘所需的全部动态变量（昨收价/止损位/做T价位/技术指标等）。"""
-    from strategy.monitor import compute_monitor_variables
+    from strategy.monitor import compute_monitor_variables, MonitorInputError
+    from strategy.position_store import save_position
 
-    result = compute_monitor_variables(
-        code=args.code,
-        position=args.position,
-        cost=args.cost,
-        cash=args.cash,
-        max_loss_pct=args.max_loss_pct,
-        max_loss_amount=args.max_loss_amount,
-        stop_loss_price=args.stop_loss_price,
-        start=args.start,
-    )
+    # D11: 若用户提供了持仓参数，顺手保存到本地配置，下次可用 --use-saved
+    # 复用，避免每次都要重新输入持仓数量/成本/资金
+    if not args.no_save:
+        save_position(
+            code=args.code, position=args.position, cost=args.cost,
+            cash=args.cash, max_loss_pct=args.max_loss_pct,
+            max_loss_amount=args.max_loss_amount,
+            stop_loss_price=args.stop_loss_price,
+        )
+
+    try:
+        result = compute_monitor_variables(
+            code=args.code,
+            position=args.position,
+            cost=args.cost,
+            cash=args.cash,
+            max_loss_pct=args.max_loss_pct,
+            max_loss_amount=args.max_loss_amount,
+            stop_loss_price=args.stop_loss_price,
+            start=args.start,
+        )
+    except MonitorInputError as e:
+        print(f"输入参数错误: {e}")
+        return
 
     if "error" in result:
         print(f"错误: {result['error']}")
@@ -270,7 +312,56 @@ def cmd_monitor(args):
     print(f"{args.code} 盯盘变量")
     print(f"{'='*40}")
     for key, value in result.items():
+        if key.startswith("_"):
+            continue
         print(f"  [{key}] = {value}")
+
+    if result.get("_数据质量_检测到拆分跳空"):
+        print(f"\n⚠️  {result['_数据质量_说明']}")
+
+    print(f"\n{result.get('_风险提示', '')}")
+
+
+def cmd_position(args):
+    """管理本地保存的持仓信息（D11：避免每次会话重复询问）。"""
+    from strategy.position_store import load_position, clear_position
+
+    if args.action == "show":
+        pos = load_position(args.code)
+        if pos is None:
+            print(f"未找到 {args.code} 的已保存持仓信息")
+            return
+        print(f"\n{args.code} 已保存的持仓信息:")
+        for k, v in pos.items():
+            print(f"  {k}: {v}")
+    elif args.action == "clear":
+        clear_position(args.code)
+        print(f"已清除 {args.code} 的已保存持仓信息")
+
+
+def cmd_log(args):
+    """记录或查看决策/交易记录（D12：便于复盘技能建议的历史表现）。"""
+    from strategy.position_store import append_decision_log, read_decision_log
+
+    if args.action == "add":
+        if not args.decision_action or args.price is None:
+            print("错误: add 操作需要提供 --decision-action 和 --price")
+            return
+        append_decision_log(
+            code=args.code, action=args.decision_action, price=args.price,
+            shares=args.shares, note=args.note,
+        )
+        print(f"已记录: {args.code} {args.decision_action} @ {args.price}")
+    elif args.action == "show":
+        entries = read_decision_log(code=args.code, limit=args.limit)
+        if not entries:
+            print(f"{args.code} 暂无决策/交易记录")
+            return
+        print(f"\n{args.code} 最近 {len(entries)} 条决策/交易记录:")
+        for e in entries:
+            shares_str = f" x{e['shares']}份" if e.get("shares") else ""
+            note_str = f" ({e['note']})" if e.get("note") else ""
+            print(f"  [{e['time']}] {e['action']} @ {e['price']}{shares_str}{note_str}")
 
 
 def main():
@@ -333,6 +424,24 @@ def main():
     p_monitor.add_argument("--stop-loss-price", type=float, default=None,
                           dest="stop_loss_price", help="用户直接指定的止损价格")
     p_monitor.add_argument("--start", default="20200101", help="历史数据起始日期")
+    p_monitor.add_argument("--no-save", action="store_true", dest="no_save",
+                          help="本次不保存持仓信息到本地（默认会自动保存）")
+
+    # position (D11: 本地持仓持久化管理)
+    p_position = subparsers.add_parser("position", help="查看/清除本地已保存的持仓信息")
+    p_position.add_argument("action", choices=["show", "clear"], help="操作类型")
+    p_position.add_argument("code", help="股票代码 (如 588170)")
+
+    # log (D12: 决策/交易记录，便于复盘)
+    p_log = subparsers.add_parser("log", help="记录或查看决策/交易记录")
+    p_log.add_argument("action", choices=["add", "show"], help="操作类型")
+    p_log.add_argument("code", help="股票代码 (如 588170)")
+    p_log.add_argument("--decision-action", dest="decision_action", default=None,
+                      help="操作类型，如 止损清仓/做T买入/做T卖出/减仓 (add时必填)")
+    p_log.add_argument("--price", type=float, default=None, help="成交/决策价格 (add时必填)")
+    p_log.add_argument("--shares", type=float, default=None, help="涉及份数")
+    p_log.add_argument("--note", default="", help="备注")
+    p_log.add_argument("--limit", type=int, default=50, help="show时显示最近N条")
 
     args = parser.parse_args()
 
@@ -347,6 +456,8 @@ def main():
         "kline": cmd_kline,
         "info": cmd_info,
         "monitor": cmd_monitor,
+        "position": cmd_position,
+        "log": cmd_log,
     }
 
     cmd_func = commands.get(args.command)

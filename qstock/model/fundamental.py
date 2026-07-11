@@ -137,7 +137,11 @@ def score_stock(code: str) -> dict:
     Returns:
         Dict with financial metrics and scores.
     """
-    financial = get_financial(code)
+    try:
+        financial = get_financial(code)
+    except Exception as e:
+        return {"code": code, "total_score": 0, "error": f"获取财务数据失败: {e}"}
+
     if not financial:
         return {"code": code, "total_score": 0, "error": "无法获取财务数据"}
 
