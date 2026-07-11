@@ -123,9 +123,7 @@ python3 qstock/main.py position show 588170
 # 跨平台检测 Python 命令：Windows 用 python，macOS/Linux 用 python3
 PY=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
 PIP=$(command -v pip3 2>/dev/null || command -v pip 2>/dev/null || echo pip3)
-# 盯盘流程（info/monitor/position/log）只依赖 pandas/numpy/requests，
-# 用 requirements-monitor.txt 这个精简依赖清单即可，不需要 sklearn/matplotlib
-$PIP install -r qstock/requirements-monitor.txt -q 2>&1 || true
+$PIP install -r qstock/requirements.txt -q 2>&1 || true
 ```
 
 后续所有 qstock 命令统一使用 `$PY` 变量（Bash 中已通过上述检测设置），或直接用 `python3`/`python` 二者皆可的回退写法：
