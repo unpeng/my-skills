@@ -11,7 +11,8 @@ import os
 import math
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from data.fetcher import get_kline, get_current_quote, is_etf_code
+from data.fetcher import get_current_quote, is_etf_code
+from data.kline_cache import get_kline_cached
 from data.processor import detect_and_truncate_split
 from model.technical import compute_all_indicators
 
@@ -125,7 +126,8 @@ def compute_monitor_variables(code: str, position: float, cost: float,
     """
     _validate_inputs(code, position, cost, cash)
 
-    df = get_kline(code, start=start)
+    # 使用本地增量缓存获取历史K线，避免每次全量拉取（方案1）
+    df = get_kline_cached(code, start=start)
     if df.empty or len(df) < 2:
         return {"error": f"无法获取 {code} 的历史数据"}
 
