@@ -32,6 +32,7 @@ from tkinter import messagebox, ttk
 from typing import List, Optional
 
 from .models import (
+    AdviceLLMResult,
     LLMResult,
     PositionForm,
     RoundResult,
@@ -260,6 +261,10 @@ class MonitorApp:
         # 若 ATR 不可用则退回原始止损位（不跟踪），保证降级可用。
         _TRAILING_ATR_N = 1.5
         self._trailing_atr_n = _TRAILING_ATR_N
+
+        # --- LLM 增强建议（异步，降级为代码规则引擎输出）---
+        from .advice_llm import AdviceLLM  # 延迟导入避免循环依赖
+        self._advice_llm = AdviceLLM(get_config=deps.settings.get_llm_config)
 
         # 主界面是否已构建（用于测试与守卫，确认前不进入主界面——需求 9.4）。
         self.main_ui_built = False
@@ -1116,6 +1121,8 @@ class MonitorApp:
             self._on_round_result(item)
         elif isinstance(item, LLMResult):
             self._render_llm(item)
+        elif isinstance(item, AdviceLLMResult):
+            self._on_advice_llm_result(item)
         # 其他类型静默忽略，避免异常中断消费循环。
 
     def _on_round_result(self, r: RoundResult) -> None:
@@ -1251,7 +1258,7 @@ class MonitorApp:
                 self.data_quality_label.config(text="")
 
     def _render_advice(self, r: RoundResult) -> None:
-        """依据当前交易时段渲染时段建议（需求 4.x）。"""
+        """依据当前交易时段渲染时段建议（需求 4.x）+ 异步 LLM 综合研判增强。"""
         if self.advice_label is None:
             return
         now = datetime.now()
@@ -1260,7 +1267,26 @@ class MonitorApp:
         session = classify_session(now, is_trading_day)
         advice = self.deps.rule_engine.session_advice(session, r.vars or {})
         header = f"【{session.value}】"
-        self._set_text(self.advice_label, f"{header} {advice.advice_text}")
+        rule_text = f"{header} {advice.advice_text}"
+        # 立即展示规则引擎文本（保证无 LLM 时也有内容）。
+        self._set_text(self.advice_label, rule_text)
+
+        # 异步 LLM 增强：后台调用，结果经队列回主线程覆盖展示（降级：LLM 失败时保留规则文本）。
+        vars_ = dict(r.vars or {})
+        effective_stop = self._effective_stop_loss(vars_)
+        self._fire_advice_llm(
+            kind="advice",
+            session_name=session.value,
+            scenario=advice.scenario,
+            rule_advice=advice.advice_text,
+            vars_=vars_,
+            effective_stop=effective_stop,
+        )
+
+        # 盘中时段额外触发技术面解读 LLM 增强（展示在 advice 面板后追加，非独立面板）。
+        from .models import TradingSession as TS
+        if session is TS.INTRADAY:
+            self._fire_advice_llm(kind="intraday_analysis", vars_=vars_)
 
     def _render_signals(self, r: RoundResult) -> None:
         """渲染信号并交由 Alert_Manager 去重与提醒（需求 5.x/6.x）。"""
@@ -1308,6 +1334,18 @@ class MonitorApp:
 
         self._set_text(self.signals_text, "\n".join(lines))
 
+        # 异步 LLM 信号操作指导：仅在有信号触发时调用（无信号时不浪费 LLM 调用）。
+        if signals:
+            signals_text_for_llm = "\n".join(
+                f"[{s.kind}] 触发价{s.trigger_price}（{'；'.join(s.reasons)}）"
+                for s in signals
+            )
+            self._fire_advice_llm(
+                kind="signal_guidance",
+                signals_text=signals_text_for_llm,
+                vars_=vars_,
+            )
+
         # 触发信号时以弹窗强化提示（需求 6.1）。
         for a in alerts:
             if a.signal_kind in ("买入", "卖出", "止损", "放量下跌止损"):
@@ -1316,6 +1354,72 @@ class MonitorApp:
                     f"信号类型：{a.signal_kind}\n标的：{a.symbol}\n"
                     f"触发价格：{a.trigger_price}\n触发时间：{a.triggered_at:%Y-%m-%d %H:%M:%S}",
                 )
+
+    def _fire_advice_llm(self, kind: str, **kwargs) -> None:
+        """在后台线程异步调用 AdviceLLM，结果经队列回主线程展示。
+
+        kind: "advice" | "signal_guidance" | "intraday_analysis"
+        kwargs: 各种参数（session_name, scenario, rule_advice, vars_, signals_text, effective_stop）
+        """
+        import concurrent.futures
+
+        def _worker():
+            try:
+                if kind == "advice":
+                    text = self._advice_llm.generate_advice(
+                        session=kwargs.get("session_name", ""),
+                        scenario=kwargs.get("scenario"),
+                        rule_advice=kwargs.get("rule_advice", ""),
+                        vars_=kwargs.get("vars_", {}),
+                        effective_stop=kwargs.get("effective_stop"),
+                    )
+                elif kind == "signal_guidance":
+                    text = self._advice_llm.generate_signal_guidance(
+                        signals_text=kwargs.get("signals_text", ""),
+                        vars_=kwargs.get("vars_", {}),
+                    )
+                elif kind == "intraday_analysis":
+                    text = self._advice_llm.generate_intraday_analysis(
+                        vars_=kwargs.get("vars_", {}),
+                    )
+                else:
+                    text = None
+            except Exception:  # noqa: BLE001  任何异常都降级为 None
+                text = None
+            self.deps.result_queue.put(AdviceLLMResult(kind=kind, text=text))
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        executor.submit(_worker)
+        executor.shutdown(wait=False)
+
+    def _on_advice_llm_result(self, item: "AdviceLLMResult") -> None:
+        """处理 LLM 增强建议结果：成功时追加/覆盖对应面板文本，失败时不动（降级）。"""
+        if item.text is None:
+            # LLM 不通：降级，保持规则引擎已展示的文本不变。
+            return
+
+        if item.kind == "advice":
+            # 用 LLM 研判覆盖时段建议面板（保留开头的规则引擎标题行作为参考）。
+            if self.advice_label is not None:
+                self._set_text(self.advice_label, item.text)
+        elif item.kind == "intraday_analysis":
+            # 盘中技术面解读追加在时段建议面板下方。
+            if self.advice_label is not None:
+                try:
+                    self.advice_label.config(state="normal")
+                    self.advice_label.insert("end", "\n\n" + item.text)
+                    self.advice_label.config(state="disabled")
+                except Exception:  # noqa: BLE001
+                    pass
+        elif item.kind == "signal_guidance":
+            # 信号操作指导追加在信号面板下方。
+            if self.signals_text is not None:
+                try:
+                    self.signals_text.config(state="normal")
+                    self.signals_text.insert("end", "\n\n💡 操作指导：" + item.text)
+                    self.signals_text.config(state="disabled")
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _render_llm(self, res: LLMResult) -> None:
         """渲染外盘/新闻研判结果（需求 7.6/7.7/7.10/7.11）。"""

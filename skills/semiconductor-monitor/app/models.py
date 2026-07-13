@@ -171,3 +171,17 @@ class LLMResult:
     used_tools: bool                        # 是否使用了联网工具（需求 7.7 展示）
     tool_rounds: int                        # 实际工具调用轮数（≤8）
     fetched_at: datetime                    # 本次获取时间
+
+
+@dataclass
+class AdviceLLMResult:
+    """LLM 增强的建议/解读结果（AdviceLLM 输出，经队列回主线程）。
+
+    kind 区分三种增强：
+      - "advice"：时段建议综合研判
+      - "signal_guidance"：信号操作指导
+      - "intraday_analysis"：盘中技术面解读
+    """
+
+    kind: str                               # "advice" / "signal_guidance" / "intraday_analysis"
+    text: Optional[str]                     # LLM 返回的文本；None 表示失败/超时（降级）
