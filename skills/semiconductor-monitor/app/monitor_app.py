@@ -250,6 +250,17 @@ class MonitorApp:
         # 避免按钮因单次查询异常而在"可点/不可点"间无意义抖动。
         self._last_known_running = False
 
+        # --- 跟踪止损状态（借鉴 vnpy CTA 的 Stop Order Trailing 机制）---
+        # 盯盘期间维护"当日最高价"，跟踪止损位 = max(原始止损位, 当日最高 − N×ATR)，
+        # 只升不降（价格冲高后回落时锁住部分利润）。每日开盘（9:15）自动重置。
+        self._trailing_high: Optional[float] = None   # 当日观测到的最高价
+        self._trailing_stop: Optional[float] = None   # 当前跟踪止损位（仅 ≥ 原始止损时有效）
+        self._trailing_date: Optional[str] = None     # 跟踪状态所属交易日（用于日切重置）
+        # 跟踪止损的 ATR 倍数（回退距离 = N×ATR），默认 1.5 倍。
+        # 若 ATR 不可用则退回原始止损位（不跟踪），保证降级可用。
+        _TRAILING_ATR_N = 1.5
+        self._trailing_atr_n = _TRAILING_ATR_N
+
         # 主界面是否已构建（用于测试与守卫，确认前不进入主界面——需求 9.4）。
         self.main_ui_built = False
 
@@ -1138,8 +1149,85 @@ class MonitorApp:
         display = choose_display_result(self.last_good_result, r)
         self.last_good_result = display
         self._render_variables(display)
+        self._update_trailing_stop(display)
         self._render_advice(display)
         self._render_signals(display)
+
+    def _update_trailing_stop(self, r: RoundResult) -> None:
+        """更新跟踪止损状态：维护当日最高价并计算跟踪止损位（只升不降）。
+
+        借鉴 vnpy CTA 策略中 Trailing Stop 的设计：
+        - 当日最高价 = max(历史所有轮次的当前价)
+        - 跟踪止损位 = 当日最高 − N×ATR
+        - 有效止损位 = max(原始止损位, 跟踪止损位)，即止损位只升不降
+
+        日切逻辑：以本轮时间日期与记录的 _trailing_date 比较，日期变化时重置
+        （新交易日的价格走势与前一日无关，不能继承前一日的最高价）。
+
+        降级：ATR 不可用（数据不足 / 为 None）时，跟踪止损不生效，退回原始止损位。
+        """
+        vars_ = r.vars or {}
+        cur = vars_.get("当前价")
+        atr = vars_.get("ATR")
+        today = r.fetched_at.strftime("%Y-%m-%d")
+
+        # 日切重置：新的一天不继承前一天的最高价。
+        if self._trailing_date != today:
+            self._trailing_high = None
+            self._trailing_stop = None
+            self._trailing_date = today
+
+        if cur is None:
+            return
+
+        try:
+            cur_f = float(cur)
+        except (TypeError, ValueError):
+            return
+
+        # 更新当日最高价（只升不降）。
+        if self._trailing_high is None or cur_f > self._trailing_high:
+            self._trailing_high = cur_f
+
+        # 计算跟踪止损位（当日最高 − N×ATR）。
+        if atr is not None:
+            try:
+                atr_f = float(atr)
+                if atr_f > 0:
+                    trail = self._trailing_high - self._trailing_atr_n * atr_f
+                    # 只升不降：与当前跟踪止损位取 max。
+                    if self._trailing_stop is None or trail > self._trailing_stop:
+                        self._trailing_stop = trail
+            except (TypeError, ValueError):
+                pass
+
+    def _effective_stop_loss(self, vars_: dict) -> Optional[float]:
+        """计算有效止损位 = max(原始止损位, 跟踪止损位)。
+
+        - 原始止损位由 compute_monitor_variables 按用户选择的方式计算（比例/金额/ATR/指定价）。
+        - 跟踪止损位由 _update_trailing_stop 维护（当日最高−N×ATR，只升不降）。
+        - 取二者的 max 作为最终有效止损位传给信号判断，保证"止损位只升不降"。
+        - 任一为 None 时取另一方；二者均 None 返回 None（保持原有行为）。
+        """
+        import math
+
+        def _num(v):
+            if v is None:
+                return None
+            try:
+                f = float(v)
+                return None if math.isnan(f) else f
+            except (TypeError, ValueError):
+                return None
+
+        original = _num(vars_.get("止损位"))
+        trailing = _num(self._trailing_stop)
+
+        if original is not None and trailing is not None:
+            return max(original, trailing)
+        if trailing is not None:
+            return trailing
+        return original
 
     def _render_variables(self, r: RoundResult) -> None:
         """渲染关键变量、技术指标、价格来源标注与数据质量说明（需求 3.2-3.7/10.3/10.6）。"""
@@ -1180,6 +1268,13 @@ class MonitorApp:
         # 把派生 MACD 柱值并入变量字典供信号判断使用。
         vars_.setdefault("macd_hist_prev", r.macd_hist_prev)
         vars_.setdefault("macd_hist_curr", r.macd_hist_curr)
+
+        # 跟踪止损：用有效止损位（max(原始, 跟踪)）替换 vars 中的止损位，
+        # 使信号判断（_eval_stop_loss）以跟踪后的更紧止损线为基准。
+        effective_stop = self._effective_stop_loss(vars_)
+        if effective_stop is not None:
+            vars_["止损位"] = effective_stop
+
         now = datetime.now()
         signals = self.deps.rule_engine.evaluate_signals(vars_)
         alerts = self.deps.alert_manager.process(signals, vars_, now)
@@ -1197,6 +1292,19 @@ class MonitorApp:
 
         for a in alerts:
             lines.append(f"⚠ 提醒：{a.signal_kind} @ {a.trigger_price}（{a.triggered_at:%H:%M:%S}）")
+
+        # 跟踪止损状态展示（让用户知道止损位是否已被上移）。
+        original_stop = (r.vars or {}).get("止损位")
+        if self._trailing_stop is not None and original_stop is not None:
+            try:
+                orig_f = float(original_stop)
+                if self._trailing_stop > orig_f:
+                    lines.append(
+                        f"📈 跟踪止损已上移：原始止损位 {orig_f:.4f} → "
+                        f"有效止损位 {self._trailing_stop:.4f}（当日最高 {self._trailing_high:.4f}）"
+                    )
+            except (TypeError, ValueError):
+                pass
 
         self._set_text(self.signals_text, "\n".join(lines))
 
