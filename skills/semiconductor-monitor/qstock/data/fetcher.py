@@ -13,8 +13,8 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    KLINE_URL, REALTIME_URL, SINGLE_REALTIME_URL, STOCK_INFO_URL,
-    REQUEST_HEADER, MARKET_FILTER, MARKET_NUM_DICT,
+    KLINE_URL, REALTIME_URL, SINGLE_REALTIME_URL, SINGLE_REALTIME_URL_FALLBACK,
+    STOCK_INFO_URL, REQUEST_HEADER, MARKET_FILTER, MARKET_NUM_DICT,
     TRADE_DETAIL_DICT, KLINE_FIELD, STOCK_INFO_DICT, FREQ_MAP,
 )
 
@@ -31,8 +31,16 @@ _session.headers.update({
 
 
 def _request_with_retry(url: str, params: dict, max_retries: int = 5,
-                        timeout: int = 20) -> requests.Response:
-    """Make HTTP request with retry logic for rate limiting."""
+                        timeout: int = 20,
+                        backoff_base: float = 5.0) -> requests.Response:
+    """Make HTTP request with retry logic for rate limiting.
+
+    Args:
+        backoff_base: 重试等待时间的基数（秒），实际等待为
+            (attempt+1)*backoff_base + 随机抖动。调用方可根据场景调低，
+            例如实时行情轮询场景应尽快失败并回退，而不是像批量拉取
+            全市场行情那样容忍较长等待。
+    """
     import random
     for attempt in range(max_retries):
         try:
@@ -43,7 +51,7 @@ def _request_with_retry(url: str, params: dict, max_retries: int = 5,
             return resp
         except (requests.ConnectionError, requests.Timeout) as e:
             if attempt < max_retries - 1:
-                wait = (attempt + 1) * 5 + random.uniform(1, 3)
+                wait = (attempt + 1) * backoff_base + random.uniform(1, 3)
                 time.sleep(wait)
             else:
                 raise
@@ -363,7 +371,20 @@ def get_realtime(code_list) -> pd.DataFrame:
         "secids": ",".join(secids),
     }
 
-    resp = _request_with_retry(SINGLE_REALTIME_URL, params=params)
+    # 该接口在盯盘场景下被高频轮询调用，且已有 get_current_quote 的
+    # K线收盘价兜底逻辑，因此用较少重试次数与较短超时/回退等待，
+    # 避免行情主机不可达时长时间阻塞轮询——尽快失败、尽快回退更重要。
+    #
+    # 主域名 push2 在部分网络环境下会对该接口稳定拒绝连接（域名级问题，
+    # 而非偶发超时/限流），同域名重试没有意义，因此只试1次就立刻切换到
+    # push2delay 域名的同一接口（该域名重试2次），而不是在同一个坏域名
+    # 上耗尽重试次数后才回退到精度更低的K线兜底价。
+    try:
+        resp = _request_with_retry(SINGLE_REALTIME_URL, params=params,
+                                   max_retries=1, timeout=5)
+    except (requests.ConnectionError, requests.Timeout):
+        resp = _request_with_retry(SINGLE_REALTIME_URL_FALLBACK, params=params,
+                                   max_retries=2, timeout=5, backoff_base=1.0)
     data = resp.json()
     diff = data.get("data", {}).get("diff", [])
 

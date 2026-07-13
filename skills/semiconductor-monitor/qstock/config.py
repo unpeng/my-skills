@@ -10,6 +10,12 @@ API endpoints, request headers, market mappings, and default parameters.
 KLINE_URL = "http://push2his.eastmoney.com/api/qt/stock/kline/get"
 REALTIME_URL = "http://push2.eastmoney.com/api/qt/clist/get"
 SINGLE_REALTIME_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+# push2 主域名的 ulist.np/get 接口在部分网络环境下会被稳定拒绝连接
+# （ConnectionError: Remote end closed connection），但同一接口换成
+# push2delay 域名可正常访问，且实测A股/ETF数据并非真正延迟（该域名的
+# "delay"主要针对外盘等特定市场）。作为域名级 fallback，主域名快速失败
+# 后立刻尝试该域名，避免直接放弃转向精度更低的K线兜底。
+SINGLE_REALTIME_URL_FALLBACK = "https://push2delay.eastmoney.com/api/qt/ulist.np/get"
 STOCK_INFO_URL = "http://push2.eastmoney.com/api/qt/stock/get"
 INTRADAY_URL = "https://push2.eastmoney.com/api/qt/stock/details/get"
 TRENDS_URL = "http://push2his.eastmoney.com/api/qt/stock/trends2/get"
