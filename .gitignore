@@ -9,3 +9,10 @@ decision_log.jsonl
 
 # 日K线本地增量缓存（方案1），纯本地缓存，删除后自动重建，不应提交
 kline_*.json
+
+# app_settings.json 含用户填写的大模型接口地址/API密钥等敏感配置，且 .local/ 下
+# 均为运行期产生的本地数据（持仓/日志/K线缓存/设置），不应提交
+.local/
+
+# Hypothesis 属性测试的本地缓存（示例数据库等），纯本地、无需版本控制
+.hypothesis/

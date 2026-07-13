@@ -22,7 +22,7 @@ Position_Manager、Trade_Logger、Variable_Calculator、Rule_Engine、Alert_Mana
 
 ## Tasks
 
-- [ ] 1. 搭建 app 包骨架与共享数据模型
+- [x] 1. 搭建 app 包骨架与共享数据模型
   - 在 `skills/semiconductor-monitor/app/` 下创建 `__init__.py`
   - 创建 `app/models.py`：定义 `TradingSession` 枚举（集合竞价/开盘/盘中/尾盘/非交易时段）
     与共享 dataclass：`RoundResult`、`SessionAdvice`、`Signal`、`Alert`、`PositionInput`、
@@ -32,8 +32,8 @@ Position_Manager、Trade_Logger、Variable_Calculator、Rule_Engine、Alert_Mana
     组件导入 qstock 能力
   - _Requirements: 3.1, 6.1, 7.6_
 
-- [ ] 2. 实现配置持久化 Settings_Store
-  - [ ] 2.1 实现 `app/settings_store.py`
+- [x] 2. 实现配置持久化 Settings_Store
+  - [x] 2.1 实现 `app/settings_store.py`
     - 读写 `<技能根>/.local/app_settings.json`（缺省时创建默认配置）
     - `get_interval`/`set_interval`（校验 [5,3600] 整数，默认 60）、`get_llm_config`/
       `set_llm_config`、`is_sound_enabled`、`is_disclaimer_acknowledged`/确认写回
@@ -45,8 +45,8 @@ Position_Manager、Trade_Logger、Variable_Calculator、Rule_Engine、Alert_Mana
     - 覆盖默认间隔 60（2.2）、LLM 三项配置往返持久化（7.1）、免责声明确认位往返（9.3）
     - _Requirements: 2.2, 7.1, 9.3_
 
-- [ ] 3. 实现持仓管理 Position_Manager
-  - [ ] 3.1 实现 `app/position_manager.py`
+- [x] 3. 实现持仓管理 Position_Manager
+  - [x] 3.1 实现 `app/position_manager.py`
     - `validate` 校验持仓数量/加权成本/可用资金/止损三选一及各边界；`save` 通过校验后调
       `save_position` 覆盖写入，捕获写盘异常返回失败结果；`load` 启动回填
     - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8_
@@ -63,8 +63,8 @@ Position_Manager、Trade_Logger、Variable_Calculator、Rule_Engine、Alert_Mana
     - 覆盖保存成功（1.1）、启动回填（1.2）、覆盖写入（1.6）、写盘失败保留输入（1.8）
     - _Requirements: 1.1, 1.2, 1.6, 1.8_
 
-- [ ] 4. 实现交易记录 Trade_Logger
-  - [ ] 4.1 实现 `app/trade_logger.py`
+- [x] 4. 实现交易记录 Trade_Logger
+  - [x] 4.1 实现 `app/trade_logger.py`
     - `add` 校验操作类型 ∈ {做T买入,做T卖出,止损,减仓} 且价格>0 后调 `append_decision_log`；
       `list` 调 `read_decision_log(code="588170", limit=50)` 按时间由早到晚返回最多 50 条
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5_
@@ -78,8 +78,8 @@ Position_Manager、Trade_Logger、Variable_Calculator、Rule_Engine、Alert_Mana
     - 覆盖保存成功提示（8.1）、无记录空状态（8.5）
     - _Requirements: 8.1, 8.5_
 
-- [ ] 5. 实现盯盘变量计算封装 Variable_Calculator
-  - [ ] 5.1 实现 `app/variable_calculator.py`
+- [x] 5. 实现盯盘变量计算封装 Variable_Calculator
+  - [x] 5.1 实现 `app/variable_calculator.py`
     - `calculate(position, timeout=10.0)`：把持仓/止损设定转参并调 `compute_monitor_variables`，
       施加 10 秒超时；从指标结果补取 `macd_hist` 末两根派生 `macd_hist_prev`/`macd_hist_curr`；
       成功封装 `RoundResult(ok=True, vars=..., price_source=...)`，异常/超时/`MonitorInputError`
@@ -90,70 +90,70 @@ Position_Manager、Trade_Logger、Variable_Calculator、Rule_Engine、Alert_Mana
       参数错误兜底为 error 结果
     - _Requirements: 3.1_
 
-- [ ] 6. 实现 Rule_Engine 交易时段判定
-  - [ ] 6.1 实现 `app/rule_engine.py` 的 `TradingSession` 与 `classify_session`
+- [x] 6. 实现 Rule_Engine 交易时段判定
+  - [x] 6.1 实现 `app/rule_engine.py` 的 `TradingSession` 与 `classify_session`
     - 按设计时间边界把全天映射为五类互斥且穷尽时段；非交易日与时段间隙归 `NON_TRADING`
     - _Requirements: 4.5_
-  - [ ]* 6.2 编写时段判定属性测试 `app/tests/test_prop_01_session.py`
+  - [x]* 6.2 编写时段判定属性测试 `app/tests/test_prop_01_session.py`
     - **Property 1: 交易时段判定互斥且穷尽**
     - **Validates: Requirements 4.5**
 
-- [ ] 7. 实现 Rule_Engine 分时段决策树（`session_advice`）
-  - [ ] 7.1 在 `app/rule_engine.py` 实现 `session_advice`
+- [x] 7. 实现 Rule_Engine 分时段决策树（`session_advice`）
+  - [x] 7.1 在 `app/rule_engine.py` 实现 `session_advice`
     - 用有序区间边界列表实现集合竞价情景 1-7、开盘情景 A-F、尾盘决策树（互斥且穷尽），
       盘中展示做 T 机会与关键价位突破建议、做 T 可买份数复用 `做T可用资金上限`/`做T可买份数`；
       关键价位含 None 时返回 `data_available=False` 不出情景建议
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.6, 4.7_
-  - [ ]* 7.2 编写集合竞价情景属性测试 `app/tests/test_prop_02_call_auction.py`
+  - [x]* 7.2 编写集合竞价情景属性测试 `app/tests/test_prop_02_call_auction.py`
     - **Property 2: 集合竞价情景互斥且穷尽**
     - **Validates: Requirements 4.1**
-  - [ ]* 7.3 编写开盘情景属性测试 `app/tests/test_prop_03_opening.py`
+  - [x]* 7.3 编写开盘情景属性测试 `app/tests/test_prop_03_opening.py`
     - **Property 3: 开盘情景互斥且穷尽**
     - **Validates: Requirements 4.2**
-  - [ ]* 7.4 编写尾盘决策树属性测试 `app/tests/test_prop_04_closing.py`
+  - [x]* 7.4 编写尾盘决策树属性测试 `app/tests/test_prop_04_closing.py`
     - **Property 4: 尾盘决策树分支互斥且穷尽**
     - **Validates: Requirements 4.3**
-  - [ ]* 7.5 编写做 T 可买份数属性测试 `app/tests/test_prop_05_t_shares.py`
+  - [x]* 7.5 编写做 T 可买份数属性测试 `app/tests/test_prop_05_t_shares.py`
     - **Property 5: 做 T 可买份数计算正确**
     - **Validates: Requirements 4.6**
-  - [ ]* 7.6 编写数据不足降级属性测试 `app/tests/test_prop_06_data_unavailable.py`
+  - [x]* 7.6 编写数据不足降级属性测试 `app/tests/test_prop_06_data_unavailable.py`
     - **Property 6: 数据不足时降级不产出情景建议**
     - **Validates: Requirements 4.7**
   - [ ]* 7.7 编写盘中做 T 建议单元测试 `app/tests/test_rule_engine_intraday.py`
     - 验证盘中做 T 机会与关键价位突破建议文本（4.4）
     - _Requirements: 4.4_
 
-- [ ] 8. 实现 Rule_Engine 买入/卖出/止损信号（`evaluate_signals`）
-  - [ ] 8.1 在 `app/rule_engine.py` 实现 `evaluate_signals`
+- [x] 8. 实现 Rule_Engine 买入/卖出/止损信号（`evaluate_signals`）
+  - [x] 8.1 在 `app/rule_engine.py` 实现 `evaluate_signals`
     - 买入/卖出条件集合（含 `macd_hist_prev/curr` 跨周期条件）、止损（当前价<止损位）、
       放量下跌止损（今量>20日均量×1.5 且当日跌幅>3%）；比较前先判 None，None 条件既不计成立
       也不计可参与；某类可参与数<2 不生成、买卖需≥2 成立才生成
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7_
-  - [ ]* 8.2 编写买入信号属性测试 `app/tests/test_prop_07_buy.py`
+  - [x]* 8.2 编写买入信号属性测试 `app/tests/test_prop_07_buy.py`
     - **Property 7: 买入信号生成当且仅当成立条件数达标**
     - **Validates: Requirements 5.1, 5.7**
-  - [ ]* 8.3 编写卖出信号属性测试 `app/tests/test_prop_08_sell.py`
+  - [x]* 8.3 编写卖出信号属性测试 `app/tests/test_prop_08_sell.py`
     - **Property 8: 卖出信号生成当且仅当成立条件数达标**
     - **Validates: Requirements 5.2, 5.7**
-  - [ ]* 8.4 编写止损信号属性测试 `app/tests/test_prop_09_stoploss.py`
+  - [x]* 8.4 编写止损信号属性测试 `app/tests/test_prop_09_stoploss.py`
     - **Property 9: 止损信号生成当且仅当当前价低于止损位**
     - **Validates: Requirements 5.3**
-  - [ ]* 8.5 编写放量下跌止损属性测试 `app/tests/test_prop_10_volume_stoploss.py`
+  - [x]* 8.5 编写放量下跌止损属性测试 `app/tests/test_prop_10_volume_stoploss.py`
     - **Property 10: 放量下跌止损信号生成条件**
     - **Validates: Requirements 5.4**
-  - [ ]* 8.6 编写缺失值稳健性属性测试 `app/tests/test_prop_11_none_robust.py`
+  - [x]* 8.6 编写缺失值稳健性属性测试 `app/tests/test_prop_11_none_robust.py`
     - **Property 11: 缺失值稳健性（None 不影响其余判断）**
     - **Validates: Requirements 5.5, 5.6**
 
-- [ ] 9. Checkpoint - 确保纯逻辑核心测试通过
+- [x] 9. Checkpoint - 确保纯逻辑核心测试通过
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 10. 实现声音与提醒 Alert_Manager
-  - [ ] 10.1 实现 `app/sound.py` 跨平台提示音
+- [x] 10. 实现声音与提醒 Alert_Manager
+  - [x] 10.1 实现 `app/sound.py` 跨平台提示音
     - 按 `sys.platform` 选择 `winsound`（Windows）/`afplay`（macOS）/`paplay`/`aplay`（Linux）
       后端，`SoundPlayer.play()` ≤3 秒；任何后端异常静默降级为仅视觉，不影响主流程
     - _Requirements: 6.2, 6.6_
-  - [ ] 10.2 实现 `app/alert_manager.py`
+  - [x] 10.2 实现 `app/alert_manager.py`
     - `process(signals, vars, now)`：信号提醒含类型/代码 588170/触发价/时间；当前价首次达到或
       穿越止损位/做 T 买入位/做 T 卖出位时提醒并标明价位类型与价格；以指纹
       `(信号类型, 关联关键价格)` 去重（不变不重复、变化再提醒）；按声音开关决定是否 `play`
@@ -171,8 +171,8 @@ Position_Manager、Trade_Logger、Variable_Calculator、Rule_Engine、Alert_Mana
     - mock `SoundPlayer`：验证开启时播放一次、关闭时仅视觉提醒（6.2/6.6）
     - _Requirements: 6.2, 6.6_
 
-- [ ] 11. 实现后台轮询 Quote_Poller
-  - [ ] 11.1 实现 `app/quote_poller.py`
+- [x] 11. 实现后台轮询 Quote_Poller
+  - [x] 11.1 实现 `app/quote_poller.py`
     - `threading.Thread(daemon=True)` + `stop_event`/`refresh_event`/`busy` 标志；
       `refresh_event.wait(timeout=interval)` 计时；`start`/`stop`（当前轮完成后退出）/
       `request_refresh`（忙时返回 False）；每轮 `try/except` 调 Variable_Calculator 入队
@@ -186,8 +186,8 @@ Position_Manager、Trade_Logger、Variable_Calculator、Rule_Engine、Alert_Mana
     - mock 抛异常/超时：验证入队 error 结果、循环继续重试、进程不终止（2.7/10.2/10.5）
     - _Requirements: 2.7, 10.2, 10.5_
 
-- [ ] 12. 实现外盘/新闻大模型接入 LLM_Client
-  - [ ] 12.1 实现 `app/llm_client.py`（含 `WebTools` 与配置门控/失败判定辅助）
+- [x] 12. 实现外盘/新闻大模型接入 LLM_Client
+  - [x] 12.1 实现 `app/llm_client.py`（含 `WebTools` 与配置门控/失败判定辅助）
     - `WebTools.web_search`/`web_fetch`；`fetch_market_briefing` 在后台线程跑工具调用循环，
       声明 WebSearch/WebFetch，`max_tool_rounds=8`，整体 30 秒超时；不支持工具时回退为无 tools
       直接问答；提供 `config_complete(cfg)` 门控与 `is_briefing_failure(text)`（是否含 SOX/
@@ -210,8 +210,8 @@ Position_Manager、Trade_Logger、Variable_Calculator、Rule_Engine、Alert_Mana
     - mock HTTP：验证请求体含 tools 声明（7.2）、整体 30 秒超时终止（7.11）
     - _Requirements: 7.2, 7.11_
 
-- [ ] 13. 实现主窗口与编排 Monitor_App
-  - [ ] 13.1 实现 `app/monitor_app.py`
+- [x] 13. 实现主窗口与编排 Monitor_App
+  - [x] 13.1 实现 `app/monitor_app.py`
     - 构建 tkinter 主窗口与各视图（持仓/变量指标/时段建议/信号/外盘新闻/交易记录/设置）；
       `root.after(200,...)` 消费队列取 `RoundResult`/`LLMResult`；持有 `last_good_result`
       失败轮不清空；首启免责声明门（确认前不进入主界面）；底部 `pack(side=BOTTOM,fill=X)`
@@ -235,14 +235,14 @@ Position_Manager、Trade_Logger、Variable_Calculator、Rule_Engine、Alert_Mana
     - 视图切换时底部提示条常驻可见（9.2）、间隔默认 60（2.2）
     - _Requirements: 9.2, 2.2_
 
-- [ ] 14. 组装入口 main_app.py
-  - [ ] 14.1 实现 `app/main_app.py`
+- [x] 14. 组装入口 main_app.py
+  - [x] 14.1 实现 `app/main_app.py`
     - 注入 `<技能根>/qstock` 到 `sys.path`；实例化 Settings_Store/Position_Manager/
       Trade_Logger/Variable_Calculator/Rule_Engine/Alert_Manager/Quote_Poller/LLM_Client
       并装配进 `MonitorApp`，创建 `tk.Tk()` 后 `MonitorApp(root, deps).run()` 启动
     - _Requirements: 1.2, 2.1, 9.3_
 
-- [ ] 15. Final checkpoint - 运行全部属性测试与单元测试
+- [x] 15. Final checkpoint - 运行全部属性测试与单元测试
   - 运行 `python3 -m pytest app/tests/`（属性测试 `@settings(max_examples=100)`），确保
     Property 1–26 属性测试与全部单元/集成/smoke 测试可执行并通过；如有失败先定位修复
   - Ensure all tests pass, ask the user if questions arise.

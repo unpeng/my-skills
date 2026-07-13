@@ -43,7 +43,8 @@ def _request_with_retry(url: str, params: dict, max_retries: int = 5,
             return resp
         except (requests.ConnectionError, requests.Timeout) as e:
             if attempt < max_retries - 1:
-                wait = (attempt + 1) * 5 + random.uniform(1, 3)
+                # 退避等待收敛，避免盯盘轮询在数据源不可达时长时间阻塞（原为 5s 递增）。
+                wait = (attempt + 1) * 1.5 + random.uniform(0.3, 1.0)
                 time.sleep(wait)
             else:
                 raise
@@ -363,7 +364,8 @@ def get_realtime(code_list) -> pd.DataFrame:
         "secids": ",".join(secids),
     }
 
-    resp = _request_with_retry(SINGLE_REALTIME_URL, params=params)
+    # 实时行情用于盯盘轮询：快速失败（少重试、短超时），以便上层能及时回退到 K 线收盘价。
+    resp = _request_with_retry(SINGLE_REALTIME_URL, params=params, max_retries=2, timeout=6)
     data = resp.json()
     diff = data.get("data", {}).get("diff", [])
 
