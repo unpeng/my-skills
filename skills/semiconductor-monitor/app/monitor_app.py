@@ -72,6 +72,16 @@ _VARIABLE_FIELDS = [
     ("距回本(%)", "距回本"),
 ]
 
+# 关键价位/当前价高亮配色：操盘时最需要一眼看到的字段用更大字号+醒目色区分于
+# 其余普通字段（持仓市值/浮亏等次要展示项保持默认样式）。
+# 当前价用中性醒目蓝，止损位用警示红，做T买卖位用操作色（买绿/卖橙）。
+_HIGHLIGHT_VARIABLE_STYLES = {
+    "当前价": "#1a5fb4",
+    "止损位": "#c01c28",
+    "做T买入位": "#26a269",
+    "做T卖出位": "#e66100",
+}
+
 # 技术指标展示区字段（需求 3.3）：RSI、MACD、KDJ、布林带。
 _INDICATOR_FIELDS = [
     ("RSI", "RSI"),
@@ -204,8 +214,9 @@ class MonitorApp:
 
         # 界面组件引用（在 _enter_main 中创建）。
         self._gate_frame: Optional[tk.Frame] = None
-        self.notebook: Optional[ttk.Notebook] = None
         self.disclaimer_bar: Optional[tk.Label] = None
+        # 齿轮图标弹出的设置对话框（声音开关+大模型配置），懒创建、单例复用。
+        self._settings_dialog: Optional[tk.Toplevel] = None
         self.var_labels: dict = {}
         self.indicator_labels: dict = {}
         self.price_annotation_label: Optional[tk.Label] = None
@@ -214,11 +225,30 @@ class MonitorApp:
         self.advice_label: Optional[tk.Text] = None
         self.signals_text: Optional[tk.Text] = None
         self.update_time_label: Optional[tk.Label] = None
-        # 最近一次成功取数的时间，用于展示更新时间与计算下次更新倒计时。
+        # 最近一次成功取数的时间，仅用于展示"数据更新时间"（需求 3.8/10.4：
+        # 失败轮不覆盖上一次成功展示）。
         self._last_update_time: Optional[datetime] = None
+        # 最近一次"一轮结束"（无论成功失败）的时间，用作倒计时锚点：
+        # Quote_Poller 内部按"上一轮结束后等待 interval 秒"调度下一轮，
+        # 若倒计时锚点只用成功轮时间，失败轮之后倒计时会与实际调度错位。
+        self._last_round_at: Optional[datetime] = None
         self._countdown_job: Optional[str] = None
         self.llm_text: Optional[tk.Text] = None
         self.trade_list: Optional[tk.Listbox] = None
+
+        # 工具栏按钮引用（用于同步"开始/暂停/立即刷新"的启用状态，需与
+        # Quote_Poller 的实际运行/忙碌状态一致，而不是点击后一直保持可点）。
+        self._btn_start: Optional[ttk.Button] = None
+        self._btn_pause: Optional[ttk.Button] = None
+        self._btn_refresh: Optional[ttk.Button] = None
+        # 乐观加载标记：点击"开始"/"立即刷新"后立即置真，弥合"后台线程真正
+        # 置位 busy"之间的调度延迟空档；本轮结果到达（成功或失败）后清除，
+        # 使倒计时能在"加载中"提示结束后立即继续读秒（而不是等下一次 tick）。
+        self._loading = False
+        self._loading_started_at: Optional[datetime] = None
+        # 降级兜底：Quote_Poller.is_running() 调用失败时沿用最近一次已知状态，
+        # 避免按钮因单次查询异常而在"可点/不可点"间无意义抖动。
+        self._last_known_running = False
 
         # 主界面是否已构建（用于测试与守卫，确认前不进入主界面——需求 9.4）。
         self.main_ui_built = False
@@ -238,11 +268,17 @@ class MonitorApp:
     # ------------------------------------------------------------------
     # 启动与免责声明门（需求 9.3/9.4）
     # ------------------------------------------------------------------
+    # 默认窗口尺寸（用户当前使用中实测的舒适尺寸，替代此前"按屏幕 85% 自适应"
+    # 的动态计算——固定默认尺寸更符合"设置成默认"的预期，且已验证在常见屏幕
+    # 分辨率下能完整容纳所有面板不裁切）。
+    _DEFAULT_WIDTH = 1394
+    _DEFAULT_HEIGHT = 852
+
     def run(self) -> None:
         """启动应用：首启需先确认免责声明，之后进入主界面。"""
         self.root.title(f"{SYMBOL} 盯盘助手")
-        # 放大初始窗口，确保盯盘页所有面板一屏可见、无需滚动。
-        self.root.geometry("1280x820")
+        # 固定默认尺寸并居中显示；超大屏/小屏兜底见 _size_to_default。
+        self._size_to_default()
         try:
             self.root.minsize(1024, 680)
         except Exception:  # noqa: BLE001  个别平台不支持时忽略
@@ -251,6 +287,26 @@ class MonitorApp:
         # 底部常驻的免责声明提示条仍保留（需求 9.1/9.2）。
         self._enter_main()
         self._bring_to_front()
+
+    def _size_to_default(self) -> None:
+        """按固定默认尺寸（``_DEFAULT_WIDTH`` x ``_DEFAULT_HEIGHT``）居中显示窗口。
+
+        屏幕小于默认尺寸时按屏幕的 95% 收缩，避免窗口超出屏幕边界；正常情况下
+        使用固定默认尺寸，不再随屏幕分辨率浮动缩放。
+        """
+        w, h = self._DEFAULT_WIDTH, self._DEFAULT_HEIGHT
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            w = min(w, int(screen_w * 0.95))
+            h = min(h, int(screen_h * 0.95))
+        except Exception:  # noqa: BLE001  取屏幕尺寸失败时直接用默认尺寸、不居中
+            self.root.geometry(f"{self._DEFAULT_WIDTH}x{self._DEFAULT_HEIGHT}")
+            return
+
+        x = max(0, (screen_w - w) // 2)
+        y = max(0, (screen_h - h) // 2)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
     def _bring_to_front(self) -> None:
         """把主窗口刷新并置于最前，避免内容未绘制或被其他窗口遮挡而看似白屏。"""
@@ -352,27 +408,117 @@ class MonitorApp:
         # 启动每秒刷新的"更新时间 + 下次更新倒计时"显示。
         self._tick_countdown()
 
+    def _poller_is_running(self) -> bool:
+        """查询 Quote_Poller 是否处于运行状态，带降级兜底。
+
+        Quote_Poller 是后台线程封装，理论上 ``is_running()`` 不应抛异常；但为避免
+        单次查询异常（如属性缺失、跨线程竞态）导致按钮状态与倒计时显示崩溃或
+        剧烈抖动，查询失败时沿用最近一次已知的运行状态而非默认展示"未运行"。
+        """
+        try:
+            running = bool(self.deps.quote_poller.is_running())
+        except Exception:  # noqa: BLE001  降级：保留最近已知状态
+            return self._last_known_running
+        self._last_known_running = running
+        return running
+
+    def _poller_is_busy(self) -> bool:
+        """查询 Quote_Poller 是否有一轮正在进行中，带降级兜底。
+
+        查询失败时退回本地的乐观加载标记 ``self._loading``（点击"开始"/"立即
+        刷新"时置真、结果到达后置假），保证即使查询异常也不会永久卡在"加载中"
+        或漏显加载态。
+        """
+        try:
+            return bool(self.deps.quote_poller.is_busy())
+        except Exception:  # noqa: BLE001  降级：退回本地乐观加载标记
+            return self._loading
+
+    def _request_refresh_with_loading(self) -> bool:
+        """请求立即刷新一轮，并同步置位本地乐观加载标记。
+
+        Returns:
+            True 表示请求已被 Quote_Poller 接受（本轮将立即开始）；False 表示
+            被忽略（当前有一轮正在进行中）或请求过程本身异常（降级为拒绝）。
+        """
+        try:
+            accepted = bool(self.deps.quote_poller.request_refresh())
+        except Exception:  # noqa: BLE001  请求异常时降级为"未接受"，不假装成功
+            accepted = False
+        if accepted:
+            self._loading = True
+            self._loading_started_at = datetime.now()
+        return accepted
+
+    def _sync_toolbar_buttons(self) -> None:
+        """按 Quote_Poller 的实际运行/忙碌状态同步"开始/暂停/立即刷新"按钮的启用状态。
+
+        - 运行中：禁用"开始"（已在运行，无需重复启动）、启用"暂停"；
+        - 未运行：启用"开始"、禁用"暂停"（未运行时也无法有意义地暂停）；
+        - 忙碌（本轮进行中，含本地乐观加载态）或未运行：禁用"立即刷新"
+          （未运行时没有后台线程消费刷新请求，点击无意义；忙碌时点击会被忽略，
+          禁用能更直接地告知用户"当前不可操作"而非点击后被静默忽略或弹提示）。
+        """
+        running = self._poller_is_running()
+        busy = self._poller_is_busy() or self._loading
+        if self._btn_start is not None:
+            self._btn_start.config(state=(tk.DISABLED if running else tk.NORMAL))
+        if self._btn_pause is not None:
+            self._btn_pause.config(state=(tk.NORMAL if running else tk.DISABLED))
+        if self._btn_refresh is not None:
+            self._btn_refresh.config(
+                state=(tk.NORMAL if (running and not busy) else tk.DISABLED)
+            )
+
     def _refresh_update_time_label(self) -> None:
-        """刷新"数据更新时间 + 下次更新倒计时"文本（需求：展示数据新鲜度）。"""
+        """刷新"数据更新时间 + 运行状态/倒计时"文本（需求：展示数据新鲜度）。
+
+        三种互斥状态：
+          - 未运行（已暂停）：提示"轮询已暂停"；
+          - 有一轮正在进行（含刚点击尚未真正置忙的过渡态）：展示"正在获取最新
+            行情…"替换秒数读数（需求：加载中要有明确提示替换读秒）；
+          - 运行中且空闲：正常倒计时读数，锚点用"上一轮结束时间"
+            （``_last_round_at``，无论该轮成功或失败都会更新——Quote_Poller
+            内部就是按"上一轮结束后等待 interval 秒"调度下一轮，用这个锚点
+            才能与实际调度保持同步，不会因为失败轮而与倒计时错位）。
+        """
         if self.update_time_label is None:
             return
-        if self._last_update_time is None:
-            self.update_time_label.config(text="数据更新时间：--　|　下次更新倒计时：等待首轮数据…")
-            return
-        updated = self._last_update_time.strftime("%H:%M:%S")
-        try:
-            interval = int(self.deps.settings.get_interval())
-        except Exception:  # noqa: BLE001
-            interval = 60
-        elapsed = (datetime.now() - self._last_update_time).total_seconds()
-        remaining = int(max(0, round(interval - elapsed)))
-        self.update_time_label.config(
-            text=f"数据更新时间：{updated}　|　下次更新倒计时：{remaining} 秒"
+
+        updated = (
+            self._last_update_time.strftime("%H:%M:%S")
+            if self._last_update_time is not None
+            else "--"
         )
+        running = self._poller_is_running()
+        busy = self._poller_is_busy() or self._loading
+
+        if not running:
+            status = "轮询已暂停（点击「开始」恢复）"
+        elif busy:
+            status = "正在获取最新行情…"
+        elif self._last_round_at is None:
+            status = "等待首轮数据…"
+        else:
+            try:
+                interval = int(self.deps.settings.get_interval())
+            except Exception:  # noqa: BLE001  降级：取间隔失败时按默认 60 秒展示
+                interval = 60
+            elapsed = (datetime.now() - self._last_round_at).total_seconds()
+            remaining = int(max(0, round(interval - elapsed)))
+            status = f"下次更新倒计时：{remaining} 秒"
+
+        self.update_time_label.config(text=f"数据更新时间：{updated}　|　{status}")
 
     def _tick_countdown(self) -> None:
-        """每秒刷新一次倒计时显示（在主线程内周期执行）。"""
+        """每秒刷新一次倒计时显示，并同步工具栏按钮状态（在主线程内周期执行）。
+
+        按钮状态放在这里周期同步（而非仅在点击后一次性设置），是为了兜底
+        "自动调度的轮询开始/结束"（未经用户点击按钮触发）也能及时反映到按钮
+        的可用性上，例如某一轮自动开始后"立即刷新"应立刻变为不可点。
+        """
         self._refresh_update_time_label()
+        self._sync_toolbar_buttons()
         self._countdown_job = self.root.after(1000, self._tick_countdown)
 
     def _autostart_polling(self) -> None:
@@ -380,12 +526,18 @@ class MonitorApp:
         try:
             self.deps.quote_poller.start()
             # 立即触发第一轮（否则要等待 refresh_event.wait(interval) 到点）。
-            self.deps.quote_poller.request_refresh()
+            self._request_refresh_with_loading()
         except Exception:  # noqa: BLE001  自动启动失败不影响手动"开始轮询"
             pass
+        self._sync_toolbar_buttons()
 
     def _build_main_ui(self) -> None:
-        """构建主界面：底部常驻免责声明条 + 单页可滚动仪表盘（所有信息整合在同一界面）。"""
+        """构建主界面：顶部工具栏 + 单页网格仪表盘 + 底部常驻免责声明条。
+
+        不再使用"盯盘/设置"两个 Tab：轮询间隔/开始/暂停/立即刷新统一放在顶部
+        工具栏（一直可见、无需切换页签）；声音开关与大模型三项配置移入工具栏
+        右上角齿轮图标点击后弹出的独立设置对话框（不常用、点击后才展示）。
+        """
         # 需求 9.1/9.2：底部提示条先以 side=BOTTOM 常驻布局，确保缩放/滚动不遮挡、不被截断。
         self.disclaimer_bar = tk.Label(
             self.root,
@@ -398,23 +550,21 @@ class MonitorApp:
         )
         self.disclaimer_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # 两个 Tab：盯盘（所有信息整合在一页、网格布局、不滚动）+ 设置（单独一页）。
-        notebook = ttk.Notebook(self.root)
-        notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        self.notebook = notebook
+        # 顶部工具栏：轮询间隔 + 开始/暂停/立即刷新 + 右侧齿轮设置入口。
+        self._build_toolbar(self.root)
 
-        board = ttk.Frame(notebook, padding=8)
-        notebook.add(board, text="盯盘")
-        settings_tab = ttk.Frame(notebook, padding=12)
-        notebook.add(settings_tab, text="设置")
+        board = ttk.Frame(self.root, padding=8)
+        board.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         # 盯盘页按功能上下分区：上方为只读展示区、下方为可交互输入区，中间以分隔线区隔。
         # 左右两列布局：
         #   左列：上=变量指标、下=外盘新闻
         #   右列：上→下 = 时段建议、信号、持仓录入
         board.rowconfigure(0, weight=1)
-        board.columnconfigure(0, weight=3, uniform="cols")  # 左列略宽（含变量指标）
-        board.columnconfigure(1, weight=2, uniform="cols")
+        # 左右两列等宽（此前左列 weight=3:2 明显偏宽，把持仓录入等右列内容挤
+        # 得过窄）；变量指标区内容本身不多，等宽即可容纳，不需要额外偏重左列。
+        board.columnconfigure(0, weight=1, uniform="cols")
+        board.columnconfigure(1, weight=1, uniform="cols")
 
         # ----- 左列 -----
         left = ttk.Frame(board)
@@ -432,9 +582,11 @@ class MonitorApp:
         right = ttk.Frame(board)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=2)   # 时段建议
-        right.rowconfigure(1, weight=2)   # 信号
-        right.rowconfigure(2, weight=3)   # 持仓录入
+        # 持仓录入改为左右两列后所需高度大幅降低，把空间让给时段建议/信号
+        # （这两块是操盘时最需要持续关注的核心信息，理应占更大展示面积）。
+        right.rowconfigure(0, weight=3)   # 时段建议（加大）
+        right.rowconfigure(1, weight=3)   # 信号（加大）
+        right.rowconfigure(2, weight=0)   # 持仓录入：内容定高，不参与额外空间分配
 
         advice_frame = ttk.LabelFrame(right, text="时段建议（只读）", padding=10)
         advice_frame.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
@@ -449,14 +601,122 @@ class MonitorApp:
         self._build_advice_view(advice_frame)
         self._build_signals_view(signals_frame)
         self._build_position_view(pos_frame)
-        self._build_settings_view(settings_tab)
 
         # 启动回填持仓（需求 1.2）。
         self._reload_position_form()
 
+    # --- 顶部工具栏：轮询控制 + 齿轮设置入口 -----------------------------
+    def _build_toolbar(self, parent) -> None:
+        """构建顶部常驻工具栏。
+
+        左侧：轮询间隔输入框 + 开始/暂停/立即刷新按钮（原设置页内容，改为
+        随时可见、无需切换页签）。
+        右侧：齿轮图标 ⚙ 按钮，点击弹出独立设置对话框（声音开关 + 大模型
+        三项配置，这些是不常用的一次性配置项，弹窗承载更合适）。
+        """
+        toolbar = ttk.Frame(parent, padding=(8, 6))
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+
+        settings = self.deps.settings
+        ttk.Label(toolbar, text="轮询间隔(秒)").pack(side=tk.LEFT, padx=(0, 4))
+        self._interval_var = tk.StringVar(value=str(settings.get_interval()))
+        ttk.Entry(toolbar, textvariable=self._interval_var, width=8).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Button(
+            toolbar, text="应用间隔", command=self._on_apply_interval
+        ).pack(side=tk.LEFT, padx=(0, 12))
+
+        # 开始/暂停/立即刷新按钮引用需保留，以便按 Quote_Poller 实际运行/忙碌
+        # 状态同步启用与禁用（而不是点击后一直保持可点、与真实状态脱节）。
+        self._btn_start = ttk.Button(toolbar, text="▶ 开始", command=self._on_start_poll)
+        self._btn_start.pack(side=tk.LEFT, padx=(0, 6))
+        self._btn_pause = ttk.Button(toolbar, text="⏸ 暂停", command=self._on_stop_poll)
+        self._btn_pause.pack(side=tk.LEFT, padx=(0, 6))
+        self._btn_refresh = ttk.Button(
+            toolbar, text="⟳ 立即刷新", command=self._on_refresh_now
+        )
+        self._btn_refresh.pack(side=tk.LEFT, padx=(0, 6))
+
+        # 右上角齿轮设置入口（声音开关 + 大模型三项配置）。
+        ttk.Button(
+            toolbar, text="⚙", width=3, command=self._open_settings_dialog
+        ).pack(side=tk.RIGHT)
+
+    def _on_apply_interval(self) -> None:
+        """工具栏"应用间隔"：校验并持久化轮询间隔（需求 2.3/2.4），非法则回填原值。"""
+        settings = self.deps.settings
+        raw = (self._interval_var.get() or "").strip()
+        interval_val: object = raw
+        try:
+            if raw and float(raw).is_integer():
+                interval_val = int(float(raw))
+        except (TypeError, ValueError):
+            interval_val = raw
+        res = settings.set_interval(interval_val)
+        if not res.ok:
+            messagebox.showerror("轮询间隔未保存", res.message)
+            self._interval_var.set(str(settings.get_interval()))
+            return
+        messagebox.showinfo("轮询间隔", res.message)
+        # 新间隔立即影响倒计时展示（Quote_Poller 每轮都实时读取间隔配置，
+        # 下一轮即会按新值调度；这里仅是让倒计时读数不必等到下一次 tick 才刷新）。
+        self._refresh_update_time_label()
+
+    def _open_settings_dialog(self) -> None:
+        """点击齿轮图标：弹出设置对话框（声音开关 + 大模型三项配置）。
+
+        单例复用：已打开则直接提到最前，不重复创建多个窗口。
+        """
+        if self._settings_dialog is not None:
+            try:
+                if self._settings_dialog.winfo_exists():
+                    self._settings_dialog.lift()
+                    self._settings_dialog.focus_force()
+                    return
+            except Exception:  # noqa: BLE001  引用失效则重新创建
+                pass
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("设置")
+        dialog.resizable(False, False)
+        # 独立小窗口，不阻塞主窗口交互（非 modal），关闭后清空引用以便下次重建。
+        dialog.protocol("WM_DELETE_WINDOW", lambda: self._close_settings_dialog(dialog))
+        self._settings_dialog = dialog
+
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+        self._build_settings_form(frame)
+
+        try:
+            dialog.transient(self.root)
+            dialog.update_idletasks()
+            # 相对主窗口居中弹出。
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+            dw, dh = dialog.winfo_width(), dialog.winfo_height()
+            dialog.geometry(f"+{rx + max(0, (rw - dw)//2)}+{ry + max(0, (rh - dh)//2)}")
+        except Exception:  # noqa: BLE001  定位失败不影响弹窗可用性
+            pass
+
+    def _close_settings_dialog(self, dialog: "tk.Toplevel") -> None:
+        dialog.destroy()
+        self._settings_dialog = None
+
     # --- 持仓视图（需求 1.x）---------------------------------------------
     def _build_position_view(self, parent) -> None:
+        """构建持仓录入表单：左右两列布局，降低整体高度，把空间让给时段建议/信号。
+
+        左列：基本信息（持仓数量/加权成本/可用资金）；
+        右列：止损设定四选一（比例/金额/直接指定价/ATR止损倍数）。
+        ATR 止损（借鉴 abu）：止损位=成本−N×ATR，波动越大止损越宽、不易被日内
+        震荡扫出；需 ATR 数据可用（历史K线足够），否则展示时会说明暂不可用。
+        """
         frame = parent
+        frame.columnconfigure(0, weight=0)
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(2, weight=0)
+        frame.columnconfigure(3, weight=1)
 
         self._pos_vars = {
             "position": tk.StringVar(),
@@ -465,39 +725,46 @@ class MonitorApp:
             "max_loss_pct": tk.StringVar(),
             "max_loss_amount": tk.StringVar(),
             "stop_loss_price": tk.StringVar(),
+            "atr_stop_n": tk.StringVar(),
         }
         self._stop_mode = tk.StringVar(value="max_loss_pct")
 
-        rows = [
+        # 左列：基本信息（3 行）。
+        ttk.Label(frame, text="基本信息", font=("", 9, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 2)
+        )
+        left_rows = [
             ("持仓数量（份）", "position"),
             ("加权成本", "cost"),
             ("可用资金", "cash"),
         ]
-        for i, (label, key) in enumerate(rows):
-            ttk.Label(frame, text=label).grid(row=i, column=0, sticky=tk.W, pady=3)
-            ttk.Entry(frame, textvariable=self._pos_vars[key], width=20).grid(
-                row=i, column=1, sticky=tk.W, pady=3
+        for i, (label, key) in enumerate(left_rows):
+            ttk.Label(frame, text=label).grid(row=1 + i, column=0, sticky=tk.W, pady=2)
+            ttk.Entry(frame, textvariable=self._pos_vars[key], width=14).grid(
+                row=1 + i, column=1, sticky=tk.W, pady=2, padx=(4, 12)
             )
 
-        # 止损三选一（需求 1.5）。
-        ttk.Label(frame, text="止损设定（三选一）").grid(
-            row=3, column=0, sticky=tk.W, pady=(10, 3)
+        # 右列：止损设定四选一（需求 1.5，4 行）。
+        ttk.Label(frame, text="止损设定（四选一）", font=("", 9, "bold")).grid(
+            row=0, column=2, columnspan=2, sticky=tk.W, pady=(0, 2)
         )
         stop_rows = [
             ("最大亏损比例(%)", "max_loss_pct"),
             ("最大亏损金额", "max_loss_amount"),
             ("直接指定止损价", "stop_loss_price"),
+            ("ATR止损倍数N", "atr_stop_n"),
         ]
         for j, (label, key) in enumerate(stop_rows):
             ttk.Radiobutton(
                 frame, text=label, variable=self._stop_mode, value=key
-            ).grid(row=4 + j, column=0, sticky=tk.W, pady=2)
-            ttk.Entry(frame, textvariable=self._pos_vars[key], width=20).grid(
-                row=4 + j, column=1, sticky=tk.W, pady=2
+            ).grid(row=1 + j, column=2, sticky=tk.W, pady=2)
+            ttk.Entry(frame, textvariable=self._pos_vars[key], width=14).grid(
+                row=1 + j, column=3, sticky=tk.W, pady=2, padx=(4, 0)
             )
 
+        # 保存按钮放在两列下方（右列现有 4 行，取 row=5 让按钮位于两列内容之下）。
         ttk.Button(frame, text="保存持仓", command=self._on_save_position).grid(
-            row=8, column=0, columnspan=2, pady=(12, 0)
+            row=5, column=0, columnspan=4, pady=(8, 0)
         )
 
     def _reload_position_form(self) -> None:
@@ -520,6 +787,9 @@ class MonitorApp:
         elif pos.stop_loss_price is not None:
             self._pos_vars["stop_loss_price"].set(str(pos.stop_loss_price))
             self._stop_mode.set("stop_loss_price")
+        elif pos.atr_stop_n is not None:
+            self._pos_vars["atr_stop_n"].set(str(pos.atr_stop_n))
+            self._stop_mode.set("atr_stop_n")
 
     def _on_save_position(self) -> None:
         """保存持仓：仅提交所选止损方式对应字段，其余止损字段置空（需求 1.1/1.5）。"""
@@ -531,6 +801,7 @@ class MonitorApp:
             max_loss_pct=self._pos_vars["max_loss_pct"].get() if mode == "max_loss_pct" else "",
             max_loss_amount=self._pos_vars["max_loss_amount"].get() if mode == "max_loss_amount" else "",
             stop_loss_price=self._pos_vars["stop_loss_price"].get() if mode == "stop_loss_price" else "",
+            atr_stop_n=self._pos_vars["atr_stop_n"].get() if mode == "atr_stop_n" else "",
         )
         result = self.deps.position_manager.save(form)
         if result.ok:
@@ -578,9 +849,21 @@ class MonitorApp:
         for idx, (label, key) in enumerate(_VARIABLE_FIELDS):
             r = 5 + idx // 2
             c = (idx % 2) * 2
-            ttk.Label(frame, text=label + "：").grid(row=r, column=c, sticky=tk.W, pady=2)
-            value_label = ttk.Label(frame, text="-", width=18, anchor=tk.W)
-            value_label.grid(row=r, column=c + 1, sticky=tk.W, pady=2)
+            style = _HIGHLIGHT_VARIABLE_STYLES.get(key)
+            label_font = ("", 12, "bold") if style else ("", 10)
+            ttk.Label(frame, text=label + "：", font=label_font).grid(
+                row=r, column=c, sticky=tk.W, pady=3
+            )
+            if style is not None:
+                # 高亮字段（当前价/止损位/做T买卖位）：用 tk.Label 加大字号+
+                # 醒目前景色，与其余普通字段区分，避免关键信息被忽略。
+                value_label = tk.Label(
+                    frame, text="-", width=18, anchor=tk.W,
+                    font=("", 13, "bold"), fg=style,
+                )
+            else:
+                value_label = ttk.Label(frame, text="-", width=18, anchor=tk.W)
+            value_label.grid(row=r, column=c + 1, sticky=tk.W, pady=3)
             self.var_labels[key] = value_label
 
         base = 5 + (len(_VARIABLE_FIELDS) + 1) // 2
@@ -708,25 +991,25 @@ class MonitorApp:
                 tk.END, f"{e.time}  {e.action}  价格 {e.price}"
             )
 
-    # --- 设置视图（需求 2.x/6.6/7.1）------------------------------------
-    def _build_settings_view(self, parent) -> None:
-        frame = parent
+    # --- 齿轮设置对话框内容（需求 6.6/7.1）：声音开关 + 大模型三项配置 -----
+    def _build_settings_form(self, frame) -> None:
+        """在齿轮弹出的设置对话框中构建表单：声音开关 + 大模型三项配置。
 
+        轮询间隔与开始/暂停/立即刷新已移至顶部工具栏常驻展示，不再放在本
+        对话框中；本对话框只保留不常用的一次性配置项。
+        """
         settings = self.deps.settings
-        # 轮询间隔（需求 2.2/2.3/2.4）。
-        ttk.Label(frame, text="轮询间隔（秒，5-3600）").grid(row=0, column=0, sticky=tk.W, pady=3)
-        self._interval_var = tk.StringVar(value=str(settings.get_interval()))
-        ttk.Entry(frame, textvariable=self._interval_var, width=12).grid(
-            row=0, column=1, sticky=tk.W, pady=3
-        )
 
         # 声音开关（需求 6.6）。
         self._sound_var = tk.BooleanVar(value=settings.is_sound_enabled())
         ttk.Checkbutton(frame, text="启用声音提醒", variable=self._sound_var).grid(
-            row=1, column=0, columnspan=2, sticky=tk.W, pady=3
+            row=0, column=0, columnspan=2, sticky=tk.W, pady=3
         )
 
         # 大模型三项配置（需求 7.1）。
+        ttk.Label(frame, text="大模型接口配置", font=("", 10, "bold")).grid(
+            row=1, column=0, columnspan=2, sticky=tk.W, pady=(10, 3)
+        )
         cfg = settings.get_llm_config()
         self._llm_vars = {
             "base_url": tk.StringVar(value=cfg.base_url),
@@ -746,38 +1029,12 @@ class MonitorApp:
             ).grid(row=2 + i, column=1, sticky=tk.W, pady=3)
 
         ttk.Button(frame, text="保存设置", command=self._on_save_settings).grid(
-            row=6, column=0, columnspan=2, pady=(12, 0)
+            row=5, column=0, columnspan=2, pady=(12, 0)
         )
-
-        # 轮询控制按钮（需求 2.5/2.6）。
-        ctrl = ttk.Frame(frame)
-        ctrl.grid(row=7, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
-        ttk.Button(ctrl, text="开始轮询", command=self._on_start_poll).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        ttk.Button(ctrl, text="停止轮询", command=self._on_stop_poll).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        ttk.Button(ctrl, text="立即刷新", command=self._on_refresh_now).pack(side=tk.LEFT)
 
     def _on_save_settings(self) -> None:
-        """保存设置：间隔校验（需求 2.3/2.4）、声音开关（6.6）、大模型三项（7.1）。"""
+        """保存设置弹窗中的内容：声音开关（6.6）、大模型三项（7.1）。"""
         settings = self.deps.settings
-        # 轮询间隔：非整数/越界由 Settings_Store 拒绝并保留原值。
-        raw = (self._interval_var.get() or "").strip()
-        interval_val: object = raw
-        try:
-            if raw and float(raw).is_integer():
-                interval_val = int(float(raw))
-        except (TypeError, ValueError):
-            interval_val = raw
-        res = settings.set_interval(interval_val)
-        if not res.ok:
-            messagebox.showerror("设置未保存", res.message)
-            # 回填为保留的原间隔值。
-            self._interval_var.set(str(settings.get_interval()))
-            return
-
         settings.set_sound_enabled(bool(self._sound_var.get()))
         from .models import LLMConfig  # 局部导入，避免顶层耦合
         settings.set_llm_config(
@@ -790,16 +1047,37 @@ class MonitorApp:
         messagebox.showinfo("设置", "设置已保存。")
 
     def _on_start_poll(self) -> None:
-        self.deps.quote_poller.start()
+        """点击"开始"：启动轮询并立即触发首轮刷新，随后同步按钮状态与倒计时。"""
+        try:
+            self.deps.quote_poller.start()
+        except Exception as exc:  # noqa: BLE001  启动异常时明确提示而非静默失败
+            messagebox.showerror("开始轮询失败", f"无法启动轮询：{exc}")
+            return
+        # 启动后立即触发一轮，避免用户点击"开始"后要空等一个完整间隔才看到数据。
+        self._request_refresh_with_loading()
+        self._sync_toolbar_buttons()
+        self._refresh_update_time_label()
 
     def _on_stop_poll(self) -> None:
-        self.deps.quote_poller.stop()
+        """点击"暂停"：停止轮询（当前进行中的一轮跑完后不再继续），同步按钮状态。"""
+        try:
+            self.deps.quote_poller.stop()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("暂停轮询失败", f"无法暂停轮询：{exc}")
+            return
+        self._sync_toolbar_buttons()
+        self._refresh_update_time_label()
 
     def _on_refresh_now(self) -> None:
-        # 需求 2.8：忙时被忽略，返回 False 时提示用户。
-        accepted = self.deps.quote_poller.request_refresh()
+        """点击"立即刷新"：请求立即触发一轮，忙时/未运行时给出明确提示（需求 2.8）。"""
+        if not self._poller_is_running():
+            messagebox.showinfo("立即刷新", "轮询未运行，请先点击「开始」。")
+            return
+        accepted = self._request_refresh_with_loading()
         if not accepted:
             messagebox.showinfo("立即刷新", "当前轮次尚未完成，已忽略本次立即刷新请求。")
+        self._sync_toolbar_buttons()
+        self._refresh_update_time_label()
 
     # ------------------------------------------------------------------
     # 队列消费与渲染（root.after 周期驱动）
@@ -830,17 +1108,31 @@ class MonitorApp:
         # 其他类型静默忽略，避免异常中断消费循环。
 
     def _on_round_result(self, r: RoundResult) -> None:
-        """处理一轮行情结果：失败轮保留上一轮展示、成功轮全量刷新（需求 3.x/10.x）。"""
+        """处理一轮行情结果：失败轮保留上一轮展示、成功轮全量刷新（需求 3.x/10.x）。
+
+        无论本轮成功或失败，都要：
+          - 清除本地乐观加载标记（``_loading``），使倒计时能从"加载中"提示
+            切回正常读秒，而不是永远卡在加载态；
+          - 更新 ``_last_round_at`` 作为下一次倒计时的锚点（Quote_Poller 是
+            "上一轮结束后等待 interval 秒"调度下一轮，失败轮同样会推进下一轮
+            的调度时刻，倒计时锚点必须与之同步，否则会显示与实际不一致的读数）。
+        """
+        self._loading = False
+        self._loading_started_at = None
+        self._last_round_at = r.fetched_at
+        self._sync_toolbar_buttons()
+
         if not r.ok:
             # 需求 3.8/10.1/10.4：展示错误提示并保留上一轮成功展示数据不清空。
             if self.error_label is not None:
                 self.error_label.config(text=f"数据获取失败：{r.error or '未知错误'}")
+            self._refresh_update_time_label()
             return
 
         # 成功轮：清空错误提示、更新最近成功轮、刷新全部展示。
         if self.error_label is not None:
             self.error_label.config(text="")
-        # 记录本轮成功取数时间，供更新时间展示与倒计时使用。
+        # 记录本轮成功取数时间，仅用于展示"数据更新时间"文本。
         self._last_update_time = r.fetched_at
         self._refresh_update_time_label()
         display = choose_display_result(self.last_good_result, r)

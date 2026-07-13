@@ -10,6 +10,9 @@ API endpoints, request headers, market mappings, and default parameters.
 KLINE_URL = "http://push2his.eastmoney.com/api/qt/stock/kline/get"
 REALTIME_URL = "http://push2.eastmoney.com/api/qt/clist/get"
 SINGLE_REALTIME_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+# push2.eastmoney.com 对单只行情接口存在系统性连接故障（ConnectionError，非限流），
+# 同域名重试无意义，故障时改用 push2delay 域名兜底（数据经核对与主域名一致，非真正延迟）。
+SINGLE_REALTIME_URL_FALLBACK = "https://push2delay.eastmoney.com/api/qt/ulist.np/get"
 STOCK_INFO_URL = "http://push2.eastmoney.com/api/qt/stock/get"
 INTRADAY_URL = "https://push2.eastmoney.com/api/qt/stock/details/get"
 TRENDS_URL = "http://push2his.eastmoney.com/api/qt/stock/trends2/get"

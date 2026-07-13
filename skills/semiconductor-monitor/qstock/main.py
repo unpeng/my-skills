@@ -287,6 +287,7 @@ def cmd_monitor(args):
             cash=args.cash, max_loss_pct=args.max_loss_pct,
             max_loss_amount=args.max_loss_amount,
             stop_loss_price=args.stop_loss_price,
+            atr_stop_n=args.atr_stop_n,
         )
 
     try:
@@ -298,6 +299,7 @@ def cmd_monitor(args):
             max_loss_pct=args.max_loss_pct,
             max_loss_amount=args.max_loss_amount,
             stop_loss_price=args.stop_loss_price,
+            atr_stop_n=args.atr_stop_n,
             start=args.start,
         )
     except MonitorInputError as e:
@@ -423,6 +425,9 @@ def main():
                           dest="max_loss_amount", help="最大可承受亏损金额")
     p_monitor.add_argument("--stop-loss-price", type=float, default=None,
                           dest="stop_loss_price", help="用户直接指定的止损价格")
+    p_monitor.add_argument("--atr-stop-n", type=float, default=None,
+                          dest="atr_stop_n",
+                          help="ATR止损倍数N（止损位=成本−N×ATR，借鉴abu波动率止损）")
     p_monitor.add_argument("--start", default="20200101", help="历史数据起始日期")
     p_monitor.add_argument("--no-save", action="store_true", dest="no_save",
                           help="本次不保存持仓信息到本地（默认会自动保存）")

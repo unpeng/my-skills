@@ -32,6 +32,9 @@ _CASH_MIN = 0.0
 _CASH_MAX = 999_999_999.99
 _LOSS_PCT_MIN_EXCLUSIVE = 0.0   # (0, 100]，下界开、上界闭
 _LOSS_PCT_MAX = 100.0
+# ATR 止损倍数 N 的合法区间 (0, 20]：0.5–3 为常用区间，放宽到 20 兜底极端输入。
+_ATR_STOP_N_MIN_EXCLUSIVE = 0.0
+_ATR_STOP_N_MAX = 20.0
 
 # 确保导入 qstock 能力时其内部模块可被解析。
 ensure_qstock_on_path()
@@ -95,6 +98,7 @@ class PositionManager:
             max_loss_pct=data.get("max_loss_pct"),
             max_loss_amount=data.get("max_loss_amount"),
             stop_loss_price=data.get("stop_loss_price"),
+            atr_stop_n=data.get("atr_stop_n"),
             updated_at=data.get("updated_at"),
         )
 
@@ -108,8 +112,9 @@ class PositionManager:
         - 持仓数量 ∈ [1, 1_000_000_000] 的正整数（需求 1.3）。
         - 加权成本 ∈ [0.01, 999_999.99]（需求 1.3）。
         - 可用资金 ∈ [0, 999_999_999.99] 的非负数（需求 1.4）。
-        - 止损三选一：最大亏损比例/最大亏损金额/直接指定止损价恰好选一种（需求 1.5）。
-        - 止损数值边界：比例 ∈ (0, 100]、金额为正数、止损价为正数且低于加权成本（需求 1.7）。
+        - 止损四选一：最大亏损比例/最大亏损金额/直接指定止损价/ATR止损倍数恰好选一种（需求 1.5）。
+        - 止损数值边界：比例 ∈ (0, 100]、金额为正数、止损价为正数且低于加权成本、
+          ATR 止损倍数 ∈ (0, 20]（需求 1.7）。
         """
         errors: dict = {}
 
@@ -142,21 +147,23 @@ class PositionManager:
             else:
                 cash = parsed_cash
 
-        # --- 止损三选一：恰好一个字段非空 ---
+        # --- 止损四选一：恰好一个字段非空 ---
         stop_raw = {
             "max_loss_pct": (form.max_loss_pct or "").strip(),
             "max_loss_amount": (form.max_loss_amount or "").strip(),
             "stop_loss_price": (form.stop_loss_price or "").strip(),
+            "atr_stop_n": (form.atr_stop_n or "").strip(),
         }
         filled = [name for name, val in stop_raw.items() if val]
         max_loss_pct = None
         max_loss_amount = None
         stop_loss_price = None
+        atr_stop_n = None
 
         if len(filled) != 1:
             errors["stop_loss"] = (
-                "止损设定必须在最大亏损比例、最大亏损金额、直接指定止损价三种方式中"
-                "恰好选择一种"
+                "止损设定必须在最大亏损比例、最大亏损金额、直接指定止损价、ATR止损倍数"
+                "四种方式中恰好选择一种"
             )
         else:
             chosen = filled[0]
@@ -174,7 +181,7 @@ class PositionManager:
                     errors["max_loss_amount"] = "最大亏损金额必须为正数"
                 else:
                     max_loss_amount = amt
-            else:  # stop_loss_price
+            elif chosen == "stop_loss_price":
                 ok_sp, sp = _parse_float(stop_raw["stop_loss_price"])
                 # 直接指定止损价必须为正数，且低于加权成本。
                 if not ok_sp or sp is None or sp <= 0:
@@ -183,6 +190,13 @@ class PositionManager:
                     errors["stop_loss_price"] = "直接指定止损价必须为正数且低于加权成本"
                 else:
                     stop_loss_price = sp
+            else:  # atr_stop_n
+                ok_n, n = _parse_float(stop_raw["atr_stop_n"])
+                # ATR 止损倍数必须为 (0, 20] 的正数。
+                if not ok_n or n is None or n <= _ATR_STOP_N_MIN_EXCLUSIVE or n > _ATR_STOP_N_MAX:
+                    errors["atr_stop_n"] = "ATR止损倍数必须为 0 到 20 之间的正数（不含0）"
+                else:
+                    atr_stop_n = n
 
         if errors:
             return ValidationResult(valid=False, errors=errors, value=None)
@@ -194,6 +208,7 @@ class PositionManager:
             max_loss_pct=max_loss_pct,
             max_loss_amount=max_loss_amount,
             stop_loss_price=stop_loss_price,
+            atr_stop_n=atr_stop_n,
         )
         return ValidationResult(valid=True, errors={}, value=value)
 
@@ -227,6 +242,7 @@ class PositionManager:
                 max_loss_pct=v.max_loss_pct,
                 max_loss_amount=v.max_loss_amount,
                 stop_loss_price=v.stop_loss_price,
+                atr_stop_n=v.atr_stop_n,
             )
         except Exception as exc:  # noqa: BLE001 - 写盘异常兜底，保留用户输入
             # 需求 1.8：保存失败时展示失败提示并保留用户已输入内容（value 原样带回）。

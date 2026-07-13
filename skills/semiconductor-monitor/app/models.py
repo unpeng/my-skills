@@ -93,6 +93,7 @@ class PositionInput:
     max_loss_pct: Optional[float] = None    # 止损方式一：最大亏损比例（0.01%–100%）
     max_loss_amount: Optional[float] = None  # 止损方式二：最大亏损金额（正数）
     stop_loss_price: Optional[float] = None  # 止损方式三：直接指定止损价（正数且低于成本）
+    atr_stop_n: Optional[float] = None      # 止损方式四：ATR 止损倍数 N（止损位=成本−N×ATR）
     updated_at: Optional[str] = None        # 最近更新时间（ISO 字符串）
 
 
@@ -106,6 +107,7 @@ class PositionForm:
     max_loss_pct: str = ""                  # 最大亏损比例（原始字符串，未选填空）
     max_loss_amount: str = ""               # 最大亏损金额（原始字符串，未选填空）
     stop_loss_price: str = ""               # 直接指定止损价（原始字符串，未选填空）
+    atr_stop_n: str = ""                    # ATR 止损倍数（原始字符串，未选填空）
 
 
 @dataclass

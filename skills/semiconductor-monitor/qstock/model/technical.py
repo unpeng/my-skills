@@ -215,6 +215,54 @@ def compute_bollinger(df: pd.DataFrame, period: int = None,
     return df
 
 
+def compute_atr(df: pd.DataFrame, periods: list = None) -> pd.DataFrame:
+    """
+    Compute ATR (Average True Range) —— 平均真实波幅，衡量价格波动性。
+
+    借鉴 abu（bbfamily/abu）以 ATR 作为波动率基准单位的做法：波动率自适应的
+    止损/放量阈值/仓位控制均以 ATR 为基准，比固定百分比更能适配不同波动环境。
+
+    True Range(TR) = max(
+        当日最高 - 当日最低,
+        |当日最高 - 昨收|,
+        |当日最低 - 昨收|,
+    )
+    ATR(period) = TR 的 period 日简单移动平均。
+
+    Args:
+        df: 含 'high'/'low'/'close' 列的 K 线 DataFrame。
+        periods: 需要计算的 ATR 周期列表，默认 [14, 21]。
+
+    Returns:
+        新增 atr14 / atr21 等列，并以 atr14 作为默认 'atr' 列的 DataFrame。
+        数据不足对应周期时该列为 NaN（由 rolling 自然产生），调用方需据此判空。
+    """
+    if periods is None:
+        periods = [14, 21]
+
+    df = df.copy()
+
+    prev_close = df["close"].shift(1)
+    # 三种真实波幅取最大值；首行昨收为 NaN，其涉及项自动为 NaN，不影响后续 rolling。
+    tr = pd.concat(
+        [
+            (df["high"] - df["low"]).abs(),
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    for p in periods:
+        df[f"atr{p}"] = tr.rolling(p).mean()
+
+    # 默认 atr 取 atr14（若未计算 14 则退回首个周期），供止损/仓位等统一引用。
+    default_period = 14 if 14 in periods else periods[0]
+    df["atr"] = df[f"atr{default_period}"]
+
+    return df
+
+
 def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute all technical indicators.
@@ -230,4 +278,5 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = compute_rsi(df)
     df = compute_kdj(df)
     df = compute_bollinger(df)
+    df = compute_atr(df)
     return df

@@ -365,6 +365,13 @@ class RuleEngine:
     _MIN_PARTICIPATING = 2
     _MIN_ESTABLISHED = 2
 
+    # 放量下跌止损的跌幅阈值（需求 5.4）。基础阈值 3%；当 vars 提供"ATR百分比"
+    # （当日 ATR 相对当前价的百分比）时，阈值改为 max(3%, N×ATR%)，借鉴 abu 的
+    # 波动率自适应思路——高波动日抬高触发门槛、减少日内正常震荡造成的误报；
+    # 低波动日仍以 3% 为下限。ATR 数据缺失时退回固定 3%（向后兼容）。
+    _VOLUME_DROP_BASE_PCT = 3.0
+    _VOLUME_DROP_ATR_N = 1.5
+
     def evaluate_signals(
         self, vars: dict, prev_vars: Optional[dict] = None
     ) -> List[Signal]:
@@ -575,14 +582,22 @@ class RuleEngine:
 
         volume_surge = volume > vol_ma20 * 1.5
         drop_pct = (prev_close - cur) / prev_close * 100.0
-        if volume_surge and drop_pct > 3.0:
+
+        # 跌幅阈值：默认 3%；有 ATR 百分比时取 max(3%, N×ATR%)，随波动率自适应抬升。
+        atr_pct = _num(vars.get("ATR百分比"))
+        if atr_pct is not None and atr_pct > 0:
+            drop_threshold = max(self._VOLUME_DROP_BASE_PCT, self._VOLUME_DROP_ATR_N * atr_pct)
+        else:
+            drop_threshold = self._VOLUME_DROP_BASE_PCT
+
+        if volume_surge and drop_pct > drop_threshold:
             return Signal(
                 kind="放量下跌止损",
                 trigger_price=cur,
                 related_price=_num(vars.get("止损位")),
                 reasons=[
                     f"今日成交量{volume} > 20日均量{vol_ma20}×1.5",
-                    f"当日跌幅{round(drop_pct, 2)}% 大于3%",
+                    f"当日跌幅{round(drop_pct, 2)}% 大于阈值{round(drop_threshold, 2)}%",
                 ],
                 triggered_at=now,
             )

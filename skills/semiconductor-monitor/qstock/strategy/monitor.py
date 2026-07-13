@@ -24,9 +24,16 @@ MIN_BARS_FOR = {
     "kdj": 9,
     "macd": 26,
     "rsi": 14,
+    "atr": 14,
     "60日最高低": 60,
     "20日均量": 20,
 }
+
+# 做T仓位波动率调整（借鉴 abu 的 ATR 仓位管理）：以"日波动率=ATR/当前价"衡量，
+# 波动率不超过基准时用满资金上限，超过基准时按反比收缩，且不低于最低比例、
+# 不超过原始上限（只会因高波动而降低，不会放大）。
+_TDAY_BASE_VOL_RATIO = 0.02   # 基准日波动率 2%（ATR/当前价），低于此不缩减
+_TDAY_MIN_CASH_PCT = 20.0     # 波动率再高，做T资金比例的下限（避免缩到 0）
 
 
 class MonitorInputError(ValueError):
@@ -36,12 +43,20 @@ class MonitorInputError(ValueError):
 def resolve_stop_loss(cost: float, position: float,
                       max_loss_pct: float = None,
                       max_loss_amount: float = None,
-                      stop_loss_price: float = None) -> float:
+                      stop_loss_price: float = None,
+                      atr_stop_n: float = None,
+                      atr: float = None) -> float:
     """
-    根据用户提供的三种止损设定方式之一，计算止损位。
+    根据用户提供的四种止损设定方式之一，计算止损位。
 
     优先级：stop_loss_price（直接指定价格） > max_loss_amount（最大亏损金额）
-    > max_loss_pct（最大亏损比例）。
+    > max_loss_pct（最大亏损比例） > atr_stop_n（ATR 倍数）。UI 侧强制四选一，
+    正常只有一种非空；此处保留优先级仅作多值传入时的防御性兜底。
+
+    ATR 止损（借鉴 abu 的 N 倍 ATR 止损思路）：止损位 = 加权成本 − N×ATR。
+    波动越大止损越宽、不易被日内震荡扫出；波动越小止损越紧。需要外部传入当日
+    ATR 值；若指定了 atr_stop_n 但 atr 不可用（数据不足/为 None），返回 None，
+    由调用方据此如实说明"ATR 数据不足、止损位暂不可用"。
 
     Args:
         cost: 加权成本价
@@ -49,9 +64,11 @@ def resolve_stop_loss(cost: float, position: float,
         max_loss_pct: 最大可承受亏损比例（如 10 表示 10%）
         max_loss_amount: 最大可承受亏损金额
         stop_loss_price: 用户直接指定的止损价格
+        atr_stop_n: ATR 止损倍数 N（正数）
+        atr: 当日 ATR 值（由 compute_monitor_variables 从 K 线指标传入）
 
     Returns:
-        止损位价格，若均未提供则返回 None。
+        止损位价格，若均未提供（或 ATR 方式下 atr 不可用）则返回 None。
     """
     if stop_loss_price is not None:
         return stop_loss_price
@@ -61,6 +78,11 @@ def resolve_stop_loss(cost: float, position: float,
         return cost - max_loss_amount / position
     if max_loss_pct is not None:
         return cost * (1 - max_loss_pct / 100)
+    if atr_stop_n is not None:
+        # ATR 数据不足时不臆造止损位，返回 None 交由上层如实说明。
+        if atr is None:
+            return None
+        return cost - atr_stop_n * atr
     return None
 
 
@@ -103,6 +125,7 @@ def compute_monitor_variables(code: str, position: float, cost: float,
                               max_loss_pct: float = None,
                               max_loss_amount: float = None,
                               stop_loss_price: float = None,
+                              atr_stop_n: float = None,
                               start: str = "20200101",
                               t_cash_cap_pct: float = 80.0) -> dict:
     """
@@ -116,6 +139,7 @@ def compute_monitor_variables(code: str, position: float, cost: float,
         max_loss_pct: 最大可承受亏损比例
         max_loss_amount: 最大可承受亏损金额
         stop_loss_price: 用户直接指定的止损价
+        atr_stop_n: ATR 止损倍数（止损位 = 成本 − N×ATR，借鉴 abu 的波动率止损）
         start: 历史数据起始日期
         t_cash_cap_pct: 做T单次最多使用可用资金的比例（默认80%，避免
                        满仓做T导致无应急资金）
@@ -162,11 +186,17 @@ def compute_monitor_variables(code: str, position: float, cost: float,
     low_60 = _if_enough("60日最高低", float(df["low"].tail(60).min()) if usable_bars >= 1 else None)
     vol_ma20 = _if_enough("20日均量", float(df["volume"].tail(20).mean()) if usable_bars >= 1 else None)
 
+    # ATR（当日平均真实波幅）：数据不足对应窗口时为 None（NaN 经 _if_enough+pd_notna 归一）。
+    atr_raw = latest.get("atr")
+    atr = _if_enough("atr", float(atr_raw)) if pd_notna(atr_raw) else None
+
     stop_loss = resolve_stop_loss(
         cost=cost, position=position,
         max_loss_pct=max_loss_pct,
         max_loss_amount=max_loss_amount,
         stop_loss_price=stop_loss_price,
+        atr_stop_n=atr_stop_n,
+        atr=atr,
     )
 
     t_buy_price = _safe_round(current_price * 0.98)
@@ -197,17 +227,45 @@ def compute_monitor_variables(code: str, position: float, cost: float,
         "浮动盈亏": _safe_round((current_price - cost) * position, 2),
         "盈亏比例": _safe_round((current_price / cost - 1) * 100, 2),
         "距回本": _safe_round((cost / current_price - 1) * 100, 2) if current_price else None,
+        # ATR 及其相对当前价的百分比（供放量止损阈值自适应等使用）；数据不足为 None。
+        "ATR": _safe_round(atr),
+        "ATR百分比": _safe_round(atr / current_price * 100, 2)
+        if (atr is not None and current_price) else None,
     }
+    if atr_stop_n is not None:
+        result["ATR止损倍数"] = atr_stop_n
 
     if stop_loss is not None:
         result["止损亏损"] = _safe_round((cost - stop_loss) * position, 2)
+    elif atr_stop_n is not None and atr is None:
+        # 用户选择了 ATR 止损但 ATR 数据不足：如实说明，不臆造止损位。
+        result["_止损_说明"] = "已选择 ATR 止损方式，但 ATR 数据不足（历史K线条数不够），止损位暂不可用。"
 
-    # C8: 做T资金设上限保护，不将可用资金全部打满，避免判断错误后
-    # 没有应急资金
+    # C8: 做T资金设上限保护，不将可用资金全部打满，避免判断错误后没有应急资金。
+    # 增强（借鉴 abu 的 ATR 仓位管理）：在 80% 上限基础上按波动率进一步收缩——
+    # 日波动率（ATR/当前价）超过基准时按反比降低做T资金比例，波动越大投入越少；
+    # 只会因高波动下调、不会上调超过原始上限。ATR 不可用时维持原始上限（向后兼容）。
     if cash and t_buy_price:
-        t_cash_available = cash * max(0.0, min(t_cash_cap_pct, 100.0)) / 100.0
+        base_pct = max(0.0, min(t_cash_cap_pct, 100.0))
+        effective_pct = base_pct
+        vol_adjusted = False
+        if atr is not None and current_price:
+            vol_ratio = atr / current_price
+            if vol_ratio > _TDAY_BASE_VOL_RATIO:
+                # 反比收缩：波动率是基准的 k 倍则比例降到 1/k，再夹在 [下限, 上限]。
+                effective_pct = base_pct * (_TDAY_BASE_VOL_RATIO / vol_ratio)
+                effective_pct = max(_TDAY_MIN_CASH_PCT, min(effective_pct, base_pct))
+                vol_adjusted = True
+        t_cash_available = cash * effective_pct / 100.0
         result["做T可用资金上限"] = _safe_round(t_cash_available, 2)
         result["做T可买份数"] = int(t_cash_available // t_buy_price)
+        result["做T资金比例"] = _safe_round(effective_pct, 2)
+        if vol_adjusted:
+            result["_做T波动调整说明"] = (
+                f"检测到日波动率 ATR/当前价={_safe_round(atr / current_price * 100, 2)}% "
+                f"高于基准 {_TDAY_BASE_VOL_RATIO * 100:.0f}%，做T资金比例已由 {base_pct:.0f}% "
+                f"自适应下调至 {_safe_round(effective_pct, 2)}%，以降低高波动下的单次风险。"
+            )
 
     # 技术指标：数据不足以支撑对应窗口时返回 None，而不是给出失真数值
     result["RSI"] = _if_enough("rsi", _safe_round(latest.get("rsi"), 2))
@@ -216,6 +274,15 @@ def compute_monitor_variables(code: str, position: float, cost: float,
     result["MACD_DIF"] = _if_enough("macd", _safe_round(latest.get("macd_dif")))
     result["MACD_DEA"] = _if_enough("macd", _safe_round(latest.get("macd_dea")))
     result["MACD_HIST"] = _if_enough("macd", _safe_round(latest.get("macd_hist")))
+    # 上一周期 MACD 柱值：df 在本函数内已算好整条 macd_hist 序列，直接取倒数第二根，
+    # 供上层（Rule_Engine 的跨周期金叉/死叉判断）使用，避免上层为取这一个值
+    # 重新拉取K线、重新计算指标（重复网络请求会拖慢单轮耗时甚至导致超时）。
+    # 门控：prev 是倒数第二根，需 usable_bars-1 也满足 MACD 最小窗口才可信。
+    result["MACD_HIST_PREV"] = (
+        _safe_round(prev.get("macd_hist"))
+        if usable_bars - 1 >= MIN_BARS_FOR.get("macd", 0) and len(df) >= 2
+        else None
+    )
     result["MACD金叉"] = bool(latest.get("macd_golden")) if result["MACD_HIST"] is not None else None
     result["MACD死叉"] = bool(latest.get("macd_death")) if result["MACD_HIST"] is not None else None
     result["KDJ_K"] = _if_enough("kdj", _safe_round(latest.get("kdj_k"), 2))

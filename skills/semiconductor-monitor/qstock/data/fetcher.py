@@ -13,8 +13,8 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    KLINE_URL, REALTIME_URL, SINGLE_REALTIME_URL, STOCK_INFO_URL,
-    REQUEST_HEADER, MARKET_FILTER, MARKET_NUM_DICT,
+    KLINE_URL, REALTIME_URL, SINGLE_REALTIME_URL, SINGLE_REALTIME_URL_FALLBACK,
+    STOCK_INFO_URL, REQUEST_HEADER, MARKET_FILTER, MARKET_NUM_DICT,
     TRADE_DETAIL_DICT, KLINE_FIELD, STOCK_INFO_DICT, FREQ_MAP,
 )
 
@@ -365,7 +365,13 @@ def get_realtime(code_list) -> pd.DataFrame:
     }
 
     # 实时行情用于盯盘轮询：快速失败（少重试、短超时），以便上层能及时回退到 K 线收盘价。
-    resp = _request_with_retry(SINGLE_REALTIME_URL, params=params, max_retries=2, timeout=6)
+    # push2.eastmoney.com 对该接口存在系统性连接故障（非限流），同域名重试无意义，
+    # 主域名只试1次，失败立刻切换到 push2delay 备用域名（重试2次）。
+    try:
+        resp = _request_with_retry(SINGLE_REALTIME_URL, params=params, max_retries=1, timeout=6)
+    except (requests.ConnectionError, requests.Timeout):
+        resp = _request_with_retry(SINGLE_REALTIME_URL_FALLBACK, params=params,
+                                   max_retries=2, timeout=6)
     data = resp.json()
     diff = data.get("data", {}).get("diff", [])
 

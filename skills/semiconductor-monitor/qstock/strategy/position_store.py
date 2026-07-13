@@ -39,7 +39,7 @@ def _load_all() -> dict:
 
 def save_position(code: str, position: float, cost: float, cash: float = 0.0,
                   max_loss_pct: float = None, max_loss_amount: float = None,
-                  stop_loss_price: float = None) -> None:
+                  stop_loss_price: float = None, atr_stop_n: float = None) -> None:
     """保存/更新指定标的的持仓信息到本地文件。"""
     _ensure_dir()
     data = _load_all()
@@ -50,6 +50,7 @@ def save_position(code: str, position: float, cost: float, cash: float = 0.0,
         "max_loss_pct": max_loss_pct,
         "max_loss_amount": max_loss_amount,
         "stop_loss_price": stop_loss_price,
+        "atr_stop_n": atr_stop_n,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
     with open(_POSITION_FILE, "w", encoding="utf-8") as f:
