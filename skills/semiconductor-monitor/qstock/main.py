@@ -20,6 +20,10 @@ import argparse
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from config import (
+    ATR_STOP_MULTIPLIER, ATR_T_MULTIPLIER, ATR_TRAIL_MULTIPLIER,
+)
+
 
 def cmd_predict(args):
     """Predict stock direction using ML model."""
@@ -299,6 +303,9 @@ def cmd_monitor(args):
             max_loss_amount=args.max_loss_amount,
             stop_loss_price=args.stop_loss_price,
             start=args.start,
+            atr_stop_mult=args.atr_stop_mult,
+            atr_t_mult=args.atr_t_mult,
+            atr_trail_mult=args.atr_trail_mult,
         )
     except MonitorInputError as e:
         print(f"输入参数错误: {e}")
@@ -364,6 +371,140 @@ def cmd_log(args):
             print(f"  [{e['time']}] {e['action']} @ {e['price']}{shares_str}{note_str}")
 
 
+def _fetch_price_atr(code, start):
+    """获取标的当前价与最新ATR（供 grid 命令复用），失败时用K线收盘价兜底。"""
+    import math as _math
+    from data.kline_cache import get_kline_cached
+    from data.fetcher import get_current_quote
+    from data.processor import detect_and_truncate_split
+    from model.technical import compute_all_indicators
+
+    df = get_kline_cached(code, start=start)
+    if df.empty:
+        return None, None
+    df, _, _ = detect_and_truncate_split(df)
+    df = compute_all_indicators(df)
+    latest = df.iloc[-1]
+
+    atr_raw = latest.get("atr")
+    atr = None
+    try:
+        if atr_raw is not None and not _math.isnan(float(atr_raw)):
+            atr = float(atr_raw)
+    except (TypeError, ValueError):
+        atr = None
+
+    quote = get_current_quote(code)
+    if "error" not in quote:
+        price = float(quote["price"])
+    else:
+        price = float(latest["close"])
+    return price, atr
+
+
+def cmd_grid(args):
+    """改进4：计算做T分档网格挂单价位与份数。"""
+    from strategy.grid import compute_grid
+
+    price, atr = args.price, args.atr
+    if price is None or atr is None:
+        f_price, f_atr = _fetch_price_atr(args.code, args.start)
+        if f_price is None:
+            print(f"错误: 无法获取 {args.code} 的数据")
+            return
+        price = price if price is not None else f_price
+        atr = atr if atr is not None else f_atr
+
+    result = compute_grid(
+        current_price=price, atr=atr, cash=args.cash, levels=args.levels,
+        step_atr_mult=args.step_atr_mult, cash_cap_pct=args.cash_cap_pct,
+        stop_loss=args.stop_loss_price,
+    )
+    if "error" in result:
+        print(f"错误: {result['error']}")
+        return
+
+    print(f"\n{'='*50}")
+    print(f"{args.code} 做T网格 (中枢价 {result['中枢价']})")
+    print(f"{'='*50}")
+    print(f"  档间距: {result['档间距']} ({result['档间距来源']})")
+    print(f"  做T可用资金上限: {result['做T可用资金上限']}，每档: {result['每档资金上限']}")
+    print(f"\n  买入网格（跌一档买一档）:")
+    for g in result["买入网格"]:
+        flag = "  ⚠️低于止损" if g["低于止损"] else ""
+        print(f"    第{g['档位']}档  买入价 {g['买入价']}  {g['份数']}份  "
+              f"占用{g['占用资金']}{flag}")
+    print(f"\n  卖出网格（涨一档卖一档）:")
+    for g in result["卖出网格"]:
+        print(f"    第{g['档位']}档  卖出价 {g['卖出价']}  {g['份数']}份")
+    print(f"\n  {result['_说明']}")
+    print(f"\n以上数据仅供参考，不构成投资建议，市场有风险，操作需自行判断")
+
+
+def cmd_btgrid(args):
+    """改进5：单标的 ATR 网格做T + ATR止损 规则回测（验证参数有效性）。"""
+    from data.kline_cache import get_kline_cached
+    from data.processor import detect_and_truncate_split
+    from strategy.rule_backtest import backtest_atr_grid
+
+    df = get_kline_cached(args.code, start=args.start)
+    if df.empty:
+        print(f"错误: 无法获取 {args.code} 的数据")
+        return
+    df, _, _ = detect_and_truncate_split(df)
+
+    result = backtest_atr_grid(
+        df, init_cash=args.cash, k_atr=args.k_atr, n_stop=args.n_stop,
+        lot_cash_pct=args.lot_pct, max_lots=args.max_lots,
+    )
+    if "error" in result:
+        print(f"错误: {result['error']}")
+        return
+
+    p = result["params"]
+    print(f"\n{'='*50}")
+    print(f"{args.code} 规则回测 (ATR网格做T+ATR止损)")
+    print(f"{'='*50}")
+    print(f"  参数: k(网格)={p['k_atr']} n(止损)={p['n_stop']} "
+          f"每手资金%={p['lot_cash_pct']} 最大手数={p['max_lots']} "
+          f"初始资金={p['init_cash']}")
+    print(f"\n  绩效指标:")
+    for k, v in result["metrics"].items():
+        print(f"    {k}: {v}")
+
+    trades = result["trades"]
+    if trades:
+        print(f"\n  最近 {min(10, len(trades))} 笔成交:")
+        for t in trades[-10:]:
+            print(f"    [{t['date']}] {t['action']} @ {t['price']} x{t['shares']}份")
+    print(f"\n以上为历史模拟，不代表未来收益，不构成投资建议")
+
+
+def cmd_review(args):
+    """改进5：复盘决策日志，统计做T/止损的已实现盈亏与胜率。"""
+    from strategy.review import review_decisions
+
+    result = review_decisions(code=args.code)
+    if "error" in result:
+        print(f"{result['error']}")
+        return
+
+    print(f"\n{'='*50}")
+    print(f"{args.code or '全部标的'} 决策复盘")
+    print(f"{'='*50}")
+    for k, v in result.items():
+        if k == "pairs":
+            continue
+        print(f"  {k}: {v}")
+
+    pairs = result.get("pairs", [])
+    if pairs:
+        print(f"\n  配对明细（最近 {min(10, len(pairs))} 笔）:")
+        for pr in pairs[-10:]:
+            print(f"    买{pr['买入价']} → 卖{pr['卖出价']} x{pr['份数']}份 "
+                  f"盈亏{pr['盈亏']} ({pr['动作']})")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="A股股票预测分析程序",
@@ -424,6 +565,15 @@ def main():
     p_monitor.add_argument("--stop-loss-price", type=float, default=None,
                           dest="stop_loss_price", help="用户直接指定的止损价格")
     p_monitor.add_argument("--start", default="20200101", help="历史数据起始日期")
+    p_monitor.add_argument("--atr-stop-mult", type=float, default=ATR_STOP_MULTIPLIER,
+                          dest="atr_stop_mult",
+                          help=f"ATR止损倍数n，止损位=成本-n×ATR（默认{ATR_STOP_MULTIPLIER}）")
+    p_monitor.add_argument("--atr-t-mult", type=float, default=ATR_T_MULTIPLIER,
+                          dest="atr_t_mult",
+                          help=f"做T价差ATR倍数k，做T买/卖位=现价∓k×ATR（默认{ATR_T_MULTIPLIER}）")
+    p_monitor.add_argument("--atr-trail-mult", type=float, default=ATR_TRAIL_MULTIPLIER,
+                          dest="atr_trail_mult",
+                          help=f"移动止盈ATR倍数m，移动止盈位=区间最高-m×ATR（默认{ATR_TRAIL_MULTIPLIER}）")
     p_monitor.add_argument("--no-save", action="store_true", dest="no_save",
                           help="本次不保存持仓信息到本地（默认会自动保存）")
 
@@ -431,6 +581,42 @@ def main():
     p_position = subparsers.add_parser("position", help="查看/清除本地已保存的持仓信息")
     p_position.add_argument("action", choices=["show", "clear"], help="操作类型")
     p_position.add_argument("code", help="股票代码 (如 588170)")
+
+    # grid (改进4: 做T分档网格)
+    p_grid = subparsers.add_parser("grid", help="计算做T分档网格挂单价位与份数")
+    p_grid.add_argument("code", help="股票/ETF代码 (如 588170)")
+    p_grid.add_argument("--cash", type=float, default=0.0, help="可用资金")
+    p_grid.add_argument("--levels", type=int, default=3, help="网格档数（默认3）")
+    p_grid.add_argument("--step-atr-mult", type=float, default=1.0,
+                       dest="step_atr_mult", help="档间距ATR倍数（默认1.0）")
+    p_grid.add_argument("--cash-cap-pct", type=float, default=80.0,
+                       dest="cash_cap_pct", help="做T资金上限比例（默认80%%）")
+    p_grid.add_argument("--stop-loss-price", type=float, default=None,
+                       dest="stop_loss_price", help="止损位，低于此价的买入档会被标记")
+    p_grid.add_argument("--price", type=float, default=None,
+                       help="手动指定中枢价（默认取实时价）")
+    p_grid.add_argument("--atr", type=float, default=None,
+                       help="手动指定ATR（默认自动计算）")
+    p_grid.add_argument("--start", default="20200101", help="历史数据起始日期")
+
+    # btgrid (改进5: 单标的规则回测)
+    p_bt = subparsers.add_parser("btgrid", help="单标的ATR网格做T+ATR止损规则回测")
+    p_bt.add_argument("code", help="股票/ETF代码 (如 588170)")
+    p_bt.add_argument("--cash", type=float, default=100000.0, help="初始资金（默认10万）")
+    p_bt.add_argument("--k-atr", type=float, default=1.0, dest="k_atr",
+                     help="网格band = k×ATR（默认1.0）")
+    p_bt.add_argument("--n-stop", type=float, default=2.5, dest="n_stop",
+                     help="止损 = 均价 - n×ATR（默认2.5）")
+    p_bt.add_argument("--lot-pct", type=float, default=20.0, dest="lot_pct",
+                     help="每手使用初始资金比例（默认20%%）")
+    p_bt.add_argument("--max-lots", type=int, default=4, dest="max_lots",
+                     help="最多持有手数（默认4）")
+    p_bt.add_argument("--start", default="20200101", help="历史数据起始日期")
+
+    # review (改进5: 决策日志复盘)
+    p_review = subparsers.add_parser("review", help="复盘决策日志的做T/止损盈亏与胜率")
+    p_review.add_argument("code", nargs="?", default=None,
+                         help="标的代码（省略则统计全部）")
 
     # log (D12: 决策/交易记录，便于复盘)
     p_log = subparsers.add_parser("log", help="记录或查看决策/交易记录")
@@ -458,6 +644,9 @@ def main():
         "monitor": cmd_monitor,
         "position": cmd_position,
         "log": cmd_log,
+        "grid": cmd_grid,
+        "btgrid": cmd_btgrid,
+        "review": cmd_review,
     }
 
     cmd_func = commands.get(args.command)

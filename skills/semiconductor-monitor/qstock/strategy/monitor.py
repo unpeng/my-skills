@@ -15,6 +15,10 @@ from data.fetcher import get_current_quote, is_etf_code
 from data.kline_cache import get_kline_cached
 from data.processor import detect_and_truncate_split
 from model.technical import compute_all_indicators
+from config import (
+    ATR_PERIOD, ATR_STOP_MULTIPLIER, ATR_T_MULTIPLIER,
+    ATR_TRAIL_MULTIPLIER, ATR_TRAIL_WINDOW,
+)
 
 # 技术指标各自所需的最小数据长度，数据不足时应标记为不可靠而非给出误导性数值
 MIN_BARS_FOR = {
@@ -24,8 +28,11 @@ MIN_BARS_FOR = {
     "kdj": 9,
     "macd": 26,
     "rsi": 14,
+    "atr": ATR_PERIOD,
+    "移动止盈": ATR_TRAIL_WINDOW,
     "60日最高低": 60,
     "20日均量": 20,
+    "综合评分": 60,  # multi_factor_score 要求至少60条数据
 }
 
 
@@ -104,7 +111,10 @@ def compute_monitor_variables(code: str, position: float, cost: float,
                               max_loss_amount: float = None,
                               stop_loss_price: float = None,
                               start: str = "20200101",
-                              t_cash_cap_pct: float = 80.0) -> dict:
+                              t_cash_cap_pct: float = 80.0,
+                              atr_stop_mult: float = ATR_STOP_MULTIPLIER,
+                              atr_t_mult: float = ATR_T_MULTIPLIER,
+                              atr_trail_mult: float = ATR_TRAIL_MULTIPLIER) -> dict:
     """
     获取历史K线并计算 SKILL.md 中定义的全部盯盘变量。
 
@@ -119,6 +129,9 @@ def compute_monitor_variables(code: str, position: float, cost: float,
         start: 历史数据起始日期
         t_cash_cap_pct: 做T单次最多使用可用资金的比例（默认80%，避免
                        满仓做T导致无应急资金）
+        atr_stop_mult: ATR止损倍数 n，ATR止损位 = 成本 - n×ATR（借鉴abu波动率自适应止损）
+        atr_t_mult: 做T价差ATR倍数 k，做T买/卖位 = 现价 ∓ k×ATR
+        atr_trail_mult: 移动止盈ATR倍数 m，移动止盈位 = 区间最高 - m×ATR
 
     Returns:
         变量名 -> 数值 的字典；若参数不合法抛出 MonitorInputError，
@@ -162,6 +175,9 @@ def compute_monitor_variables(code: str, position: float, cost: float,
     low_60 = _if_enough("60日最高低", float(df["low"].tail(60).min()) if usable_bars >= 1 else None)
     vol_ma20 = _if_enough("20日均量", float(df["volume"].tail(20).mean()) if usable_bars >= 1 else None)
 
+    # ATR 波动率（借鉴 abu）：数据不足时为 None，做T/止损自动回退到固定百分比
+    atr_val = _if_enough("atr", float(latest.get("atr")) if pd_notna(latest.get("atr")) else None)
+
     stop_loss = resolve_stop_loss(
         cost=cost, position=position,
         max_loss_pct=max_loss_pct,
@@ -169,8 +185,15 @@ def compute_monitor_variables(code: str, position: float, cost: float,
         stop_loss_price=stop_loss_price,
     )
 
-    t_buy_price = _safe_round(current_price * 0.98)
-    t_sell_price = _safe_round(current_price * 1.02)
+    # 做T价位：优先用 ATR 自适应（现价 ∓ k×ATR），ATR不可用时回退固定±2%
+    if atr_val is not None and atr_val > 0:
+        t_buy_price = _safe_round(current_price - atr_t_mult * atr_val)
+        t_sell_price = _safe_round(current_price + atr_t_mult * atr_val)
+        t_price_source = f"ATR自适应(现价∓{atr_t_mult}×ATR)"
+    else:
+        t_buy_price = _safe_round(current_price * 0.98)
+        t_sell_price = _safe_round(current_price * 1.02)
+        t_price_source = "固定±2%(ATR数据不足回退)"
 
     result = {
         "标的类型": "ETF" if is_etf_code(code) else "个股",
@@ -184,8 +207,11 @@ def compute_monitor_variables(code: str, position: float, cost: float,
         "加权成本": cost,
         "回本价": cost,
         "止损位": _safe_round(stop_loss),
+        "ATR": _safe_round(atr_val),
+        "ATR占比%": _safe_round(atr_val / current_price * 100, 2) if (atr_val and current_price) else None,
         "做T买入位": t_buy_price,
         "做T卖出位": t_sell_price,
+        "做T价差来源": t_price_source,
         "昨收+2%": _safe_round(prev_close * 1.02),
         "昨收-2%": _safe_round(prev_close * 0.98),
         "昨收-2.5%": _safe_round(prev_close * 0.975),
@@ -201,6 +227,45 @@ def compute_monitor_variables(code: str, position: float, cost: float,
 
     if stop_loss is not None:
         result["止损亏损"] = _safe_round((cost - stop_loss) * position, 2)
+
+    # 改进1（借abu）：ATR波动率自适应止损位 = 成本 - n×ATR
+    # 与用户设定的固定止损位并列输出，作为波动率参考，不覆盖用户设定
+    atr_stop = None
+    if atr_val is not None and atr_val > 0:
+        atr_stop = cost - atr_stop_mult * atr_val
+        result["ATR止损位"] = _safe_round(atr_stop)
+        result["ATR止损说明"] = f"成本 - {atr_stop_mult}×ATR，波动越大止损越宽"
+    else:
+        result["ATR止损位"] = None
+
+    # 改进2（借abu）：移动止盈位 = 区间最高 - m×ATR，盈利后跟随上移锁利
+    is_profit = current_price > cost
+    trail_stop = None
+    trail_high = None
+    if atr_val is not None and atr_val > 0 and usable_bars >= ATR_TRAIL_WINDOW:
+        trail_high = float(df["high"].tail(ATR_TRAIL_WINDOW).max())
+        trail_stop = trail_high - atr_trail_mult * atr_val
+        result[f"近{ATR_TRAIL_WINDOW}日最高"] = _safe_round(trail_high)
+        result["移动止盈位"] = _safe_round(trail_stop)
+        result["移动止盈生效"] = bool(is_profit)
+        result["移动止盈说明"] = (
+            f"区间最高 - {atr_trail_mult}×ATR。仅在盈利(当前价>成本)时用于"
+            f"上移止损锁利；未盈利时以常规止损位为准"
+        )
+    else:
+        result["移动止盈位"] = None
+        result["移动止盈生效"] = None
+
+    # 建议动态止损位：综合用户止损/ATR止损/移动止盈给出单一可执行价位
+    # - 盈利时：取 max(常规止损, 移动止盈)，让止损随盈利抬升
+    # - 未盈利时：取常规止损（用户设定优先，无则用ATR止损）
+    base_stop = stop_loss if stop_loss is not None else atr_stop
+    suggested_stop = base_stop
+    if is_profit and trail_stop is not None:
+        candidates = [s for s in (base_stop, trail_stop) if s is not None]
+        if candidates:
+            suggested_stop = max(candidates)
+    result["建议动态止损位"] = _safe_round(suggested_stop)
 
     # C8: 做T资金设上限保护，不将可用资金全部打满，避免判断错误后
     # 没有应急资金
@@ -224,6 +289,40 @@ def compute_monitor_variables(code: str, position: float, cost: float,
     result["布林上轨"] = _if_enough("boll", _safe_round(latest.get("boll_upper")))
     result["布林中轨"] = _if_enough("boll", _safe_round(latest.get("boll_mid")))
     result["布林下轨"] = _if_enough("boll", _safe_round(latest.get("boll_lower")))
+
+    # 改进3（借tqsdk目标持仓思想）：把已有的多因子综合评分接入盯盘输出，
+    # 给出量化的方向判断和仓位倾向，让建议更一致、可复现。数据不足(<60条)
+    # 或计算失败时对应字段置 None，不影响其余变量。
+    if usable_bars >= MIN_BARS_FOR["综合评分"]:
+        try:
+            from strategy.scoring import multi_factor_score
+            score = multi_factor_score(df)
+            if "error" not in score:
+                composite = score["composite_score"]
+                result["综合评分"] = composite
+                result["评分_技术面"] = score["technical_score"]
+                result["评分_动量"] = score["momentum_score"]
+                result["评分_量能"] = score["volume_score"]
+                if composite >= 3:
+                    direction, tilt = "偏多", "偏多，可逢低加仓/持有"
+                elif composite <= -3:
+                    direction, tilt = "偏空", "偏空，反弹减仓/控制仓位"
+                else:
+                    direction, tilt = "中性", "震荡，维持现有仓位，做T为主"
+                result["方向判断"] = direction
+                result["仓位倾向"] = tilt
+            else:
+                result["综合评分"] = None
+                result["方向判断"] = None
+                result["_评分说明"] = f"综合评分不可用：{score['error']}"
+        except Exception as e:
+            result["综合评分"] = None
+            result["方向判断"] = None
+            result["_评分说明"] = f"综合评分计算异常：{e}"
+    else:
+        result["综合评分"] = None
+        result["方向判断"] = None
+        result["_评分说明"] = f"数据不足{MIN_BARS_FOR['综合评分']}条，综合评分不可用"
 
     # A2: 数据质量提示，供执行者判断是否需要向用户说明
     result["_数据质量_检测到拆分跳空"] = split_detected

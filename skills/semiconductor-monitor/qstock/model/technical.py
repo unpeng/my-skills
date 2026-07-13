@@ -12,7 +12,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     MA_PERIODS, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
-    RSI_PERIOD, KDJ_PERIOD, BOLL_PERIOD, BOLL_STD,
+    RSI_PERIOD, KDJ_PERIOD, BOLL_PERIOD, BOLL_STD, ATR_PERIOD,
 )
 
 
@@ -215,6 +215,44 @@ def compute_bollinger(df: pd.DataFrame, period: int = None,
     return df
 
 
+def compute_atr(df: pd.DataFrame, period: int = None) -> pd.DataFrame:
+    """
+    Compute ATR (Average True Range) - 波动率指标（借鉴 abu 的波动率自适应风控）。
+
+    True Range = max(high-low, |high-prev_close|, |low-prev_close|)
+    ATR 采用 Wilder 平滑（ewm alpha=1/period），为技术分析中的标准做法，
+    比简单移动平均更贴近主流软件（同花顺/通达信）的ATR取值。
+
+    Args:
+        df: DataFrame with 'high', 'low', 'close' columns
+        period: ATR period (默认取 config.ATR_PERIOD，一般为14)
+
+    Returns:
+        DataFrame with atr, atr_pct columns added.
+        - atr: 绝对波幅（价格单位）
+        - atr_pct: atr 占收盘价的百分比，便于跨标的/跨时间比较
+    """
+    if period is None:
+        period = ATR_PERIOD
+
+    df = df.copy()
+
+    high = df["high"]
+    low = df["low"]
+    close_prev = df["close"].shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - close_prev).abs(),
+        (low - close_prev).abs(),
+    ], axis=1).max(axis=1)
+
+    # Wilder 平滑（等价于 alpha = 1/period 的指数移动平均）
+    df["atr"] = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    df["atr_pct"] = df["atr"] / df["close"] * 100
+
+    return df
+
+
 def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute all technical indicators.
@@ -230,4 +268,5 @@ def compute_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = compute_rsi(df)
     df = compute_kdj(df)
     df = compute_bollinger(df)
+    df = compute_atr(df)
     return df
