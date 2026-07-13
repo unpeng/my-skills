@@ -171,10 +171,13 @@ def compute_monitor_variables(code: str, position: float, cost: float,
         current_price = float(quote["price"])
         prev_close = float(quote.get("prev_close") or prev["close"])
         price_source = quote.get("source", "realtime")
+        today_change_pct = float(quote.get("change_pct") or 0)
     else:
         current_price = float(latest["close"])
         prev_close = float(prev["close"])
         price_source = "kline_only"
+        # K线兜底时自行计算今日涨跌幅
+        today_change_pct = round((current_price / prev_close - 1) * 100, 2) if prev_close else 0.0
 
     def _if_enough(indicator_key, value):
         """数据长度不足以支撑该指标时返回 None，避免给出失真数值。"""
@@ -207,6 +210,7 @@ def compute_monitor_variables(code: str, position: float, cost: float,
         "价格来源": price_source,
         "昨收价": _safe_round(prev_close),
         "当前价": _safe_round(current_price),
+        "今日涨幅": _safe_round(today_change_pct, 2),
         "60日最高": _safe_round(high_60),
         "60日最低": _safe_round(low_60),
         "20日均量": _safe_round(vol_ma20, 0),
